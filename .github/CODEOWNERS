@@ -1,0 +1,11 @@
+# These owners will be requested for review when someone opens a pull request
+* @Yaemikoreal
+
+# CLI module
+/geocode/cli.py @Yaemikoreal
+
+# Core geocoding logic
+/geocode/geocoder.py @Yaemikoreal
+
+# Cache system
+/geocode/cache.py @Yaemikoreal

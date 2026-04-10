@@ -18,12 +18,14 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+MANIFEST
 
 # Virtual environments
 .venv/
 venv/
 ENV/
 env/
+.env
 
 # IDE
 .idea/
@@ -31,6 +33,7 @@ env/
 *.swp
 *.swo
 *~
+*.sublime-*
 
 # Testing
 .pytest_cache/
@@ -38,6 +41,8 @@ env/
 htmlcov/
 .tox/
 .nox/
+coverage.xml
+*.cover
 
 # Project specific
 output/*.csv
@@ -47,11 +52,23 @@ output/*.db
 output/*.db-wal
 output/*.db-shm
 !output/.gitkeep
-.env
 
 # Logs
 *.log
+logs/
 
 # OS
 .DS_Store
 Thumbs.db
+Desktop.ini
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Local config
+.env.local
+.env.*.local
+
+# Claude
+.claude/

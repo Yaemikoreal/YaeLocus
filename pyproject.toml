@@ -5,8 +5,25 @@ description = "Address to coordinates tool with multi-API support"
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.8"
-authors = [{name = "Yaemikoreal"}]
-keywords = ["geocode", "geocoding", "amap", "baidu", "tianditu"]
+authors = [{name = "Yaemikoreal", email = "yaemiko@github.com"}]
+maintainers = [{name = "Yaemikoreal"}]
+keywords = ["geocode", "geocoding", "amap", "baidu", "tianditu", "coordinates", "address", "latitude", "longitude", "mapping"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: GIS",
+    "Topic :: Utilities",
+    "Typing :: Typed",
+]
 dependencies = [
     "requests>=2.28.0",
     "pandas>=1.5.0",
@@ -38,3 +55,28 @@ include = ["geocode*"]
 
 [tool.setuptools.dynamic]
 version = {attr = "geocode.__version__"}
+
+[tool.ruff]
+target-version = "py38"
+line-length = 100
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "B",   # flake8-bugbear
+    "C4",  # flake8-comprehensions
+    "UP",  # pyupgrade
+]
+ignore = [
+    "E501",  # line too long (handled by formatter)
+    "B008",  # function call in default argument
+]
+
+[tool.ruff.isort]
+known-first-party = ["geocode"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-v --tb=short"
