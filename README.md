@@ -2,7 +2,8 @@
 
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Version: 1.2.0](https://img.shields.io/badge/version-1.2.0-green.svg)](https://github.com/Yaemikoreal/YaeLocus)
+[![Version: 1.3.0](https://img.shields.io/badge/version-1.3.0-green.svg)](https://github.com/Yaemikoreal/YaeLocus)
+[![PyPI](https://img.shields.io/badge/pypi-yaelocus-blue.svg)](https://pypi.org/project/yaelocus/)
 
 **Author: [Yaemikoreal](https://github.com/Yaemikoreal)**
 
@@ -17,7 +18,10 @@
 - **高性能缓存**：SQLite持久化，延迟提交，写入性能提升10倍+
 - **坐标转换**：自动转换为WGS-84坐标系
 - **交互式地图**：点聚类 + 热力图
-- **多格式支持**：CSV和Excel输入
+- **多格式支持**：CSV、Excel、JSON、GeoJSON 输入输出
+- **逆地理编码**：经纬度转地址
+- **并行处理**：多线程加速批量转换
+- **断点续传**：跳过已缓存地址，增量处理
 
 ## 项目结构
 
@@ -41,39 +45,39 @@ geocode-tool/
 
 ### 安装
 
-**方式1：双击安装（Windows）**
-
-双击 `install.bat` 即可自动安装。
-
-**方式2：命令行安装**
+**方式1：PyPI 安装（推荐）**
 
 ```bash
-# 直接指定路径安装
-pip install -e E:\Pythonproject\geocode-tool
+pip install yaelocus
+```
 
-# 或进入目录后安装
-cd E:\Pythonproject\geocode-tool
+**方式2：从源码安装**
+
+```bash
+git clone https://github.com/Yaemikoreal/YaeLocus.git
+cd YaeLocus
 pip install -e .
 ```
+
+**方式3：Windows 一键安装**
+
+双击 `install.bat` 即可自动安装。
 
 安装完成后，可通过以下方式使用：
 
 ```bash
-# 方式1：模块方式（推荐，无需配置PATH）
+# 方式1：使用命令（推荐）
+yaelocus --help
+
+# 方式2：模块方式
 python -m geocode.cli --help
-
-# 方式2：直接命令（需 Scripts 目录在 PATH 中）
-geocode-tool --help
-
-# 方式3：直接运行脚本
-python run.py -i data/清单.xlsx
 ```
 
 ### 配置
 
 ```bash
 # 交互式配置（推荐）
-geocode-tool config
+yaelocus config
 ```
 
 只需配置至少一个API密钥：
@@ -88,43 +92,71 @@ geocode-tool config
 
 ```bash
 # 执行地理编码
-python -m geocode.cli run -i data/清单.xlsx
+yaelocus run -i data/清单.xlsx
 
-# 指定地址列名
-python -m geocode.cli run -i input.xlsx -c "详细地址"
+# 多格式输出
+yaelocus run -i data/清单.xlsx -f xlsx      # Excel 输出
+yaelocus run -i data/清单.xlsx -f geojson   # GeoJSON 输出
+
+# 并行处理（5线程）
+yaelocus run -i data/清单.xlsx -w 5
+
+# 断点续传（跳过已缓存）
+yaelocus run -i data/清单.xlsx --skip-cached
+
+# 查看可用文件
+yaelocus files
+yaelocus files --detail
+
+# 查看配额使用
+yaelocus quota
 
 # 环境诊断
-python -m geocode.cli doctor
+yaelocus doctor
 
 # 查看缓存统计
-python -m geocode.cli cache stats
+yaelocus cache stats
 ```
-
-> 提示：如果 `Scripts` 目录在 PATH 中，可直接使用 `geocode-tool` 命令。
 
 ## CLI 命令
 
 ```bash
-# 单地址转换（新增）
-python -m geocode.cli geocode "北京市朝阳区"     # 转换单个地址
-python -m geocode.cli geocode "天安门" --json   # JSON格式输出
+# 单地址转换
+yaelocus geocode "北京市朝阳区"           # 转换单个地址
+yaelocus geocode "天安门" --json         # JSON格式输出
+
+# 逆地理编码（经纬度转地址）
+yaelocus reverse 39.9 116.4
+yaelocus reverse 39.9 116.4 --json
+
+# 坐标转换
+yaelocus convert 39.9 116.4 --from gcj02 --to wgs84
+yaelocus convert 39.9 116.4 --from bd09 --to wgs84 --json
 
 # 批量转换
-python -m geocode.cli run -i <文件>             # 执行地理编码
+yaelocus run -i <文件>                   # 执行地理编码
+yaelocus run -i <文件> -f xlsx           # Excel 输出
+yaelocus run -i <文件> -w 5              # 5线程并行
+yaelocus run -i <文件> --skip-cached     # 断点续传
+
+# 文件列表
+yaelocus files                           # 列出可处理文件
+yaelocus files --detail                  # 显示详细信息
+
+# 配额管理
+yaelocus quota                           # 查看配额使用
 
 # 缓存管理
-python -m geocode.cli cache stats               # 查看缓存统计
-python -m geocode.cli cache cleanup             # 清理过期缓存
-python -m geocode.cli cache export              # 导出缓存数据
+yaelocus cache stats                     # 查看缓存统计
+yaelocus cache cleanup                   # 清理过期缓存
+yaelocus cache export                    # 导出缓存数据
 
 # 配置与诊断
-python -m geocode.cli config                    # 交互式配置API密钥
-python -m geocode.cli doctor                    # 环境诊断
-python -m geocode.cli test-api                  # 测试API连通性
-python -m geocode.cli --version                 # 显示版本信息
+yaelocus config                          # 交互式配置API密钥
+yaelocus doctor                          # 环境诊断
+yaelocus test-api                        # 测试API连通性
+yaelocus --version                       # 显示版本信息
 ```
-
-> 简写：可创建别名 `alias gt="python -m geocode.cli"`
 
 ### run 命令参数
 
@@ -132,7 +164,10 @@ python -m geocode.cli --version                 # 显示版本信息
 |------|------|--------|
 | `-i, --input` | 输入文件（CSV/Excel） | 必填 |
 | `-c, --column` | 地址列名 | `地址` |
-| `-o, --output` | 输出CSV | 自动生成 |
+| `-o, --output` | 输出文件 | 自动生成 |
+| `-f, --format` | 输出格式（csv/xlsx/json/geojson） | `csv` |
+| `-w, --workers` | 并行线程数 | `1` |
+| `--skip-cached` | 跳过已缓存地址 | `False` |
 | `-m, --map` | 输出地图HTML | 自动生成 |
 | `--ttl` | 缓存过期时间(秒) | 永不过期 |
 | `--cleanup` | 清理过期缓存 | - |
@@ -150,6 +185,10 @@ with CacheManager("cache.db") as cache:
     # 单个地址转换
     result = geocoder.geocode("北京市朝阳区建国路88号")
     print(result['longitude'], result['latitude'])
+    
+    # 逆地理编码
+    address = geocoder.reverse_geocode(39.9, 116.4)
+    print(address['formatted_address'])
     
     # 批量转换
     results = geocoder.batch_geocode(["地址1", "地址2", "地址3"])
@@ -186,10 +225,10 @@ with CacheManager("cache.db") as cache:
 **Q: 首次运行找不到命令？**
 ```bash
 # 确保已安装
-pip install -e E:\Pythonproject\geocode-tool
+pip install yaelocus
 
 # 检查环境
-geocode-tool doctor
+yaelocus doctor
 ```
 
 **Q: API配额用完了？**
@@ -201,7 +240,9 @@ geocode-tool doctor
 - 百度：https://lbsyun.baidu.com（注册→控制台→创建应用）
 
 **Q: 如何卸载？**
-双击 `uninstall.bat` 或运行 `pip uninstall geocode-tool`
+```bash
+pip uninstall yaelocus
+```
 
 ## 更新日志
 
