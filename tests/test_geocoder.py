@@ -486,13 +486,14 @@ class TestGeocodeCache:
 
         geocoder = Geocoder(temp_cache, temp_logger)
         result = geocoder.geocode("北京市朝阳区")
-        geocoder.close()
 
         assert result["success"] is True
-        # 验证缓存已存储
+        # 先验证缓存（在关闭前）
         cached = temp_cache.get("北京市朝阳区")
         assert cached is not None
         assert cached["success"] is True
+
+        geocoder.close()  # 之后关闭
 
     def test_cache_ttl(self, temp_cache, temp_logger):
         """缓存 TTL 过期"""
@@ -648,11 +649,12 @@ class TestBatchGeocode:
 
         geocoder = Geocoder(temp_cache, temp_logger)
         geocoder.batch_geocode(["北京市朝阳区"], progress=False)
-        geocoder.close()
 
-        # 验证缓存已存储
+        # 先验证缓存（在关闭前）
         cached = temp_cache.get("北京市朝阳区")
         assert cached is not None
+
+        geocoder.close()
 
 
 # ============================================

@@ -43,6 +43,9 @@ htmlcov/
 .nox/
 coverage.xml
 *.cover
+test.db
+test.db-wal
+test.db-shm
 
 # Project specific
 output/*.csv

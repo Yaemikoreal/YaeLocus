@@ -80,6 +80,9 @@ class APILogger:
             for log in self._logs:
                 writer.writerow(log.to_dict())
 
+        # 清空已保存的日志，防止重复写入
+        self._logs = []
+
     def get_stats(self) -> Dict:
         """
         获取统计信息

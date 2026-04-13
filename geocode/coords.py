@@ -89,6 +89,29 @@ def bd09_to_wgs84(lat: float, lon: float) -> Tuple[float, float]:
     return gcj02_to_wgs84(gcj_lat, gcj_lon)
 
 
+def wgs84_to_gcj02(lat: float, lon: float) -> Tuple[float, float]:
+    """
+    WGS-84 坐标转 GCJ-02 坐标（逆地理编码需要）
+
+    Args:
+        lat: WGS-84 纬度
+        lon: WGS-84 经度
+
+    Returns:
+        (gcj_lat, gcj_lon): GCJ-02 坐标
+    """
+    # 反向计算：WGS-84 + 偏移 = GCJ-02
+    d_lat = _transform_lat(lon - 105.0, lat - 35.0)
+    d_lon = _transform_lon(lon - 105.0, lat - 35.0)
+    rad_lat = lat / 180.0 * math.pi
+    magic = math.sin(rad_lat)
+    magic = 1 - EE * magic * magic
+    sqrt_magic = math.sqrt(magic)
+    d_lat = (d_lat * 180.0) / ((A * (1 - EE)) / (magic * sqrt_magic) * math.pi)
+    d_lon = (d_lon * 180.0) / (A / sqrt_magic * math.cos(rad_lat) * math.pi)
+    return lat + d_lat, lon + d_lon
+
+
 def is_in_china(lat: float, lon: float) -> bool:
     """
     判断坐标是否在中国境内

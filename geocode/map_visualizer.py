@@ -18,7 +18,7 @@ def create_map(
     valid_points = [
         (item.get("latitude"), item.get("longitude"), item)
         for item in data
-        if item.get("latitude") and item.get("longitude")
+        if item.get("latitude") is not None and item.get("longitude") is not None
     ]
 
     if not valid_points:

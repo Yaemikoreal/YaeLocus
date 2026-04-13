@@ -13,6 +13,7 @@ import csv
 import os
 from pathlib import Path
 from datetime import datetime
+from unittest.mock import Mock
 
 from geocode.logger import APILogger
 from geocode.models import APILog

@@ -312,6 +312,176 @@ class Geocoder:
         """清理过期缓存"""
         return self.cache.cleanup()
 
+    def reverse_geocode(self, lat: float, lon: float) -> Dict:
+        """
+        逆地理编码：经纬度转地址
+
+        Args:
+            lat: 纬度（WGS-84坐标系）
+            lon: 经度（WGS-84坐标系）
+
+        Returns:
+            逆地理编码结果字典
+        """
+        if not lat or not lon:
+            return {"success": False, "latitude": lat, "longitude": lon, "error": "Invalid coordinates"}
+
+        self._request_count += 1
+
+        # 检查缓存（使用坐标作为键）
+        cache_key = f"reverse_{lat:.6f}_{lon:.6f}"
+        cached = self.cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        # 按优先级尝试各API
+        for api_name in Config.API_PRIORITY:
+            method = getattr(self, f"_reverse_geocode_{api_name}", None)
+            if method:
+                result = method(lat, lon)
+                if result:
+                    result.success = True
+                    self._success_count += 1
+                    result_dict = result.to_dict()
+                    # 写入缓存
+                    self.cache.set(cache_key, result_dict, self._cache_ttl)
+                    return result_dict
+
+        # 所有API都失败
+        return {
+            "success": False,
+            "latitude": lat,
+            "longitude": lon,
+            "error": "All APIs failed"
+        }
+
+    def _reverse_geocode_amap(self, lat: float, lon: float) -> Optional[GeocodeResult]:
+        """高德逆地理编码"""
+        if not Config.AMAP_KEY:
+            return None
+
+        # 转换坐标：WGS-84 -> GCJ-02
+        from .coords import wgs84_to_gcj02
+        gcj_lat, gcj_lon = wgs84_to_gcj02(lat, lon)
+
+        self._rate_limit()
+        start_time = time.time()
+
+        try:
+            params = {
+                "key": Config.AMAP_KEY,
+                "location": f"{gcj_lon},{gcj_lat}",
+                "output": "json",
+                "radius": "1000",
+                "extensions": "base"
+            }
+            response = requests.get(Config.AMAP_REGEO_URL, params=params, timeout=Config.REQUEST_TIMEOUT)
+            data = response.json()
+            time_cost = time.time() - start_time
+
+            if data.get("status") == "1" and data.get("regeocode"):
+                regeo = data["regeocode"]
+                address_component = regeo.get("addressComponent", {})
+                formatted_address = regeo.get("formatted_address", "")
+
+                self.logger.log(
+                    address=f"{lat},{lon}",
+                    api_name="amap",
+                    status="success",
+                    latitude=lat,
+                    longitude=lon,
+                    formatted_address=formatted_address,
+                    time_cost=time_cost
+                )
+                return self._build_result(
+                    f"{lat},{lon}",
+                    lat, lon,
+                    formatted_address,
+                    "amap",
+                    "WGS-84",
+                    province=address_component.get("province"),
+                    city=address_component.get("city"),
+                    district=address_component.get("district")
+                )
+
+            self.logger.log(
+                address=f"{lat},{lon}",
+                api_name="amap",
+                status="failed",
+                time_cost=time_cost,
+                error_message=data.get("info", "Unknown error")
+            )
+            return None
+
+        except Exception as e:
+            self.logger.log(
+                address=f"{lat},{lon}",
+                api_name="amap",
+                status="error",
+                time_cost=time.time() - start_time,
+                error_message=str(e)
+            )
+            return None
+
+    def _reverse_geocode_tianditu(self, lat: float, lon: float) -> Optional[GeocodeResult]:
+        """天地图逆地理编码"""
+        if not Config.TIANDITU_TK:
+            return None
+
+        self._rate_limit()
+        start_time = time.time()
+
+        try:
+            # 天地图逆地理编码参数
+            post_str = f'{{"lon":{lon},"lat":{lat},"ver":1}}'
+            params = {"postStr": post_str, "type": "geodecode", "tk": Config.TIANDITU_TK}
+            response = requests.get(Config.TIANDITU_REGEO_URL, params=params, timeout=Config.REQUEST_TIMEOUT)
+            data = response.json()
+            time_cost = time.time() - start_time
+
+            if data.get("status") == "0" and data.get("result"):
+                result_data = data["result"]
+                formatted_address = result_data.get("formatted_address", "")
+
+                self.logger.log(
+                    address=f"{lat},{lon}",
+                    api_name="tianditu",
+                    status="success",
+                    latitude=lat,
+                    longitude=lon,
+                    formatted_address=formatted_address,
+                    time_cost=time_cost
+                )
+                return self._build_result(
+                    f"{lat},{lon}",
+                    lat, lon,
+                    formatted_address,
+                    "tianditu",
+                    "CGCS2000",
+                    province=result_data.get("province"),
+                    city=result_data.get("city"),
+                    district=result_data.get("county")
+                )
+
+            self.logger.log(
+                address=f"{lat},{lon}",
+                api_name="tianditu",
+                status="failed",
+                time_cost=time_cost,
+                error_message=data.get("msg", "Unknown error")
+            )
+            return None
+
+        except Exception as e:
+            self.logger.log(
+                address=f"{lat},{lon}",
+                api_name="tianditu",
+                status="error",
+                time_cost=time.time() - start_time,
+                error_message=str(e)
+            )
+            return None
+
     def close(self) -> None:
         """关闭资源"""
         self.cache.close()

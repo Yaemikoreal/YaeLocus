@@ -44,8 +44,11 @@ class Config:
 
     # API端点
     AMAP_URL: str = "https://restapi.amap.com/v3/geocode/geo"
+    AMAP_REGEO_URL: str = "https://restapi.amap.com/v3/geocode/regeo"  # 逆地理编码
     BAIDU_URL: str = "https://api.map.baidu.com/geocoding/v3/"
+    BAIDU_REGEO_URL: str = "https://api.map.baidu.com/reverse_geocoding/v3/"  # 逆地理编码
     TIANDITU_URL: str = "http://api.tianditu.gov.cn/geocoder"
+    TIANDITU_REGEO_URL: str = "http://api.tianditu.gov.cn/geodecoder"  # 逆地理编码
 
     # 请求配置
     REQUEST_DELAY: float = 0.1  # 请求间隔(秒)

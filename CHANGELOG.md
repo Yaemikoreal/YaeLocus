@@ -5,6 +5,22 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.3.0] - 2026-04-13
+
+### 新增
+- 多格式输出支持：Excel (.xlsx)、JSON、GeoJSON (`-f` 参数)
+- `quota` 命令：查看API配额使用情况
+- `reverse` 命令：逆地理编码（经纬度转地址）
+- `convert` 命令：坐标系转换工具
+- `files` 命令：列出可处理的输入文件（支持 `-p` 指定目录、`--detail` 显示地址数量）
+- `--skip-cached` 参数：断点续传/增量处理
+- `--workers` 参数：并行请求处理（多线程）
+- `wgs84_to_gcj02()` 坐标转换函数
+
+### 变更
+- run命令新增输出格式、并行处理、断点续传参数
+- 输出逻辑重构，支持按格式/扩展名自动识别
+
 ## [1.2.0] - 2026-04-10
 
 ### 优化

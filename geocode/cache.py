@@ -17,6 +17,7 @@
 import json
 import sqlite3
 import time
+import threading
 from pathlib import Path
 from typing import Dict, Optional
 
@@ -67,13 +68,14 @@ class CacheManager:
         self._hits = 0
         self._misses = 0
         self._conn = None
+        self._lock = threading.RLock()  # 可重入锁，防止死锁
 
         self._init_db()
 
     def _init_db(self) -> None:
         """初始化数据库，支持损坏恢复"""
         try:
-            self._conn = sqlite3.connect(str(self._path), timeout=30)
+            self._conn = sqlite3.connect(str(self._path), timeout=30, check_same_thread=False)
             self._conn.executescript(self.INIT_SQL)
             # 性能优化
             self._conn.execute("PRAGMA journal_mode=WAL")
@@ -93,14 +95,19 @@ class CacheManager:
             except Exception:
                 pass
 
-        # 删除损坏的数据库文件
+        # 删除损坏的数据库文件（带重试机制处理Windows文件锁定）
         for suffix in ['', '-wal', '-shm']:
             p = Path(str(self._path) + suffix)
             if p.exists():
-                p.unlink()
+                for _ in range(3):  # 重试3次
+                    try:
+                        p.unlink()
+                        break
+                    except PermissionError:
+                        time.sleep(0.1)  # 等待文件释放
 
         # 重新创建
-        self._conn = sqlite3.connect(str(self._path), timeout=30)
+        self._conn = sqlite3.connect(str(self._path), timeout=30, check_same_thread=False)
         self._conn.executescript(self.INIT_SQL)
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA synchronous=NORMAL")
@@ -124,29 +131,30 @@ class CacheManager:
         """
         key = self._normalize_key(address)
 
-        try:
-            row = self._conn.execute(
-                "SELECT data, expires_at FROM cache WHERE key = ?", (key,)
-            ).fetchone()
+        with self._lock:  # 线程安全
+            try:
+                row = self._conn.execute(
+                    "SELECT data, expires_at FROM cache WHERE key = ?", (key,)
+                ).fetchone()
 
-            if row is None:
+                if row is None:
+                    self._misses += 1
+                    return None
+
+                # 检查过期
+                if row['expires_at'] and row['expires_at'] < time.time():
+                    self._conn.execute("DELETE FROM cache WHERE key = ?", (key,))
+                    self._misses += 1
+                    return None
+
+                self._hits += 1
+                return json.loads(row['data'])
+
+            except sqlite3.DatabaseError:
+                # 数据库损坏，尝试恢复
+                self._rebuild_db()
                 self._misses += 1
                 return None
-
-            # 检查过期
-            if row['expires_at'] and row['expires_at'] < time.time():
-                self._conn.execute("DELETE FROM cache WHERE key = ?", (key,))
-                self._misses += 1
-                return None
-
-            self._hits += 1
-            return json.loads(row['data'])
-
-        except sqlite3.DatabaseError:
-            # 数据库损坏，尝试恢复
-            self._rebuild_db()
-            self._misses += 1
-            return None
 
     def set(self, address: str, result: Dict, ttl: float = None) -> None:
         """
@@ -162,57 +170,61 @@ class CacheManager:
         effective_ttl = ttl if ttl is not None else self._ttl
         expires = now + effective_ttl if effective_ttl else None
 
-        try:
-            self._conn.execute(
-                "INSERT OR REPLACE INTO cache (key, address, data, created_at, expires_at, source) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (key, address, json.dumps(result, ensure_ascii=False), now, expires, result.get('source'))
-            )
+        with self._lock:  # 线程安全
+            try:
+                self._conn.execute(
+                    "INSERT OR REPLACE INTO cache (key, address, data, created_at, expires_at, source) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (key, address, json.dumps(result, ensure_ascii=False) if result is not None else "null", now, expires, result.get('source') if result else None)
+                )
 
-            self._pending += 1
-            # 达到阈值自动提交
-            if self._pending >= self._batch_size:
-                self.flush()
+                self._pending += 1
+                # 达到阈值自动提交
+                if self._pending >= self._batch_size:
+                    self.flush()
 
-        except sqlite3.DatabaseError:
-            # 数据库损坏，尝试恢复后重试
-            self._rebuild_db()
-            self._conn.execute(
-                "INSERT OR REPLACE INTO cache (key, address, data, created_at, expires_at, source) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (key, address, json.dumps(result, ensure_ascii=False), now, expires, result.get('source'))
-            )
-            self._pending += 1
+            except sqlite3.DatabaseError:
+                # 数据库损坏，尝试恢复后重试
+                self._rebuild_db()
+                self._conn.execute(
+                    "INSERT OR REPLACE INTO cache (key, address, data, created_at, expires_at, source) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (key, address, json.dumps(result, ensure_ascii=False) if result is not None else "null", now, expires, result.get('source') if result else None)
+                )
+                self._pending += 1
 
     def flush(self) -> None:
         """手动提交待写入的数据"""
-        if self._pending > 0:
-            try:
-                self._conn.commit()
-            except sqlite3.DatabaseError:
-                self._rebuild_db()
-            self._pending = 0
+        with self._lock:  # 线程安全
+            if self._pending > 0:
+                try:
+                    self._conn.commit()
+                except sqlite3.DatabaseError:
+                    self._rebuild_db()
+                self._pending = 0
 
     def delete(self, address: str) -> bool:
         """删除缓存"""
         key = self._normalize_key(address)
-        try:
-            cursor = self._conn.execute("DELETE FROM cache WHERE key = ?", (key,))
-            self._conn.commit()
-            return cursor.rowcount > 0
-        except sqlite3.DatabaseError:
-            self._rebuild_db()
-            return False
+        with self._lock:  # 线程安全
+            try:
+                cursor = self._conn.execute("DELETE FROM cache WHERE key = ?", (key,))
+                self._conn.commit()
+                return cursor.rowcount > 0
+            except sqlite3.DatabaseError:
+                self._rebuild_db()
+                return False
 
     def clear(self) -> None:
         """清空所有缓存"""
-        try:
-            self._conn.execute("DELETE FROM cache")
-            self._conn.commit()
-        except sqlite3.DatabaseError:
-            self._rebuild_db()
-        self._hits = 0
-        self._misses = 0
+        with self._lock:  # 线程安全
+            try:
+                self._conn.execute("DELETE FROM cache")
+                self._conn.commit()
+            except sqlite3.DatabaseError:
+                self._rebuild_db()
+            self._hits = 0
+            self._misses = 0
 
     def cleanup(self) -> int:
         """
@@ -221,28 +233,30 @@ class CacheManager:
         Returns:
             清理的条目数
         """
-        try:
-            cursor = self._conn.execute(
-                "DELETE FROM cache WHERE expires_at IS NOT NULL AND expires_at < ?",
-                (time.time(),)
-            )
-            self._conn.commit()
-            return cursor.rowcount
-        except sqlite3.DatabaseError:
-            self._rebuild_db()
-            return 0
+        with self._lock:  # 线程安全
+            try:
+                cursor = self._conn.execute(
+                    "DELETE FROM cache WHERE expires_at IS NOT NULL AND expires_at < ?",
+                    (time.time(),)
+                )
+                self._conn.commit()
+                return cursor.rowcount
+            except sqlite3.DatabaseError:
+                self._rebuild_db()
+                return 0
 
     def get_stats(self) -> Dict:
         """获取缓存统计信息"""
-        try:
-            total = self._conn.execute("SELECT COUNT(*) FROM cache").fetchone()[0]
-            expired = self._conn.execute(
-                "SELECT COUNT(*) FROM cache WHERE expires_at IS NOT NULL AND expires_at < ?",
-                (time.time(),)
-            ).fetchone()[0]
-        except sqlite3.DatabaseError:
-            total = 0
-            expired = 0
+        with self._lock:  # 线程安全
+            try:
+                total = self._conn.execute("SELECT COUNT(*) FROM cache").fetchone()[0]
+                expired = self._conn.execute(
+                    "SELECT COUNT(*) FROM cache WHERE expires_at IS NOT NULL AND expires_at < ?",
+                    (time.time(),)
+                ).fetchone()[0]
+            except sqlite3.DatabaseError:
+                total = 0
+                expired = 0
 
         total_requests = self._hits + self._misses
         hit_rate = round(self._hits / total_requests * 100, 2) if total_requests > 0 else 0.0
@@ -258,20 +272,22 @@ class CacheManager:
 
     def count(self) -> int:
         """获取缓存条目数"""
-        try:
-            return self._conn.execute("SELECT COUNT(*) FROM cache").fetchone()[0]
-        except sqlite3.DatabaseError:
-            return 0
+        with self._lock:  # 线程安全
+            try:
+                return self._conn.execute("SELECT COUNT(*) FROM cache").fetchone()[0]
+            except sqlite3.DatabaseError:
+                return 0
 
     def close(self) -> None:
         """关闭缓存管理器，确保数据持久化"""
-        self.flush()
-        if self._conn:
-            try:
-                self._conn.close()
-            except Exception:
-                pass
-            self._conn = None
+        with self._lock:  # 线程安全
+            self.flush()
+            if self._conn:
+                try:
+                    self._conn.close()
+                except Exception:
+                    pass
+                self._conn = None
 
     def __len__(self) -> int:
         return self.count()

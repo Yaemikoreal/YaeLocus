@@ -60,14 +60,14 @@ class TestCacheRecovery:
         """数据库锁定处理"""
         cache_file = tmp_path / "locked.db"
 
-        # 打开两个连接
+        # 打开第一个连接
         cache1 = CacheManager(cache_file=str(cache_file))
         cache1.set("地址1", {"lat": 1})
+        cache1.flush()  # 先提交，释放写锁
 
-        # 第二个连接（模拟锁定）
-        # 注意：SQLite 默认有超时设置
+        # 第二个连接（WAL 模式支持并发读，但写入需等待）
         cache2 = CacheManager(cache_file=str(cache_file))
-        cache2.set("地址2", {"lat": 2})  # 应该能成功（WAL 模式）
+        cache2.set("地址2", {"lat": 2})  # 应该能成功
 
         cache1.close()
         cache2.close()
