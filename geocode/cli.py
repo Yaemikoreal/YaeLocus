@@ -450,7 +450,6 @@ def run(
     elif actual_format == "json" or output_path.suffix.lower() == ".json":
         output_df.to_json(output_path, orient="records", force_ascii=False, indent=2)
     elif actual_format == "geojson" or output_path.suffix.lower() == ".geojson":
-        import json
         geojson_data = {
             "type": "FeatureCollection",
             "features": [
@@ -594,7 +593,6 @@ def cache(
         console.print(f"[green][OK][/green] 清理过期缓存: {cleaned} 条")
 
     elif action == "export":
-        import json
         export_path = resolve_path("output/cache_export.json")
         import sqlite3
         conn = sqlite3.connect(str(cache_path))
@@ -827,7 +825,6 @@ def geocode(
 
     # 输出结果
     if json_output:
-        import json
         output = {
             "address": address,
             "longitude": result.get("longitude"),
@@ -921,7 +918,6 @@ def reverse(
 
     # 输出结果
     if json_output:
-        import json
         output = {
             "latitude": lat,
             "longitude": lon,
@@ -1020,7 +1016,6 @@ def convert(
 
     # 输出结果
     if json_output:
-        import json
         output = {
             "input": {"lat": lat, "lon": lon, "coordinate_system": from_sys},
             "output": {"lat": result_lat, "lon": result_lon, "coordinate_system": to_sys}
