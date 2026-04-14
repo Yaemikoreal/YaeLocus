@@ -2,7 +2,7 @@
 
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Version: 1.3.1](https://img.shields.io/badge/version-1.3.1-green.svg)](https://github.com/Yaemikoreal/YaeLocus)
+[![Version: 1.4.0](https://img.shields.io/badge/version-1.4.0-green.svg)](https://github.com/Yaemikoreal/YaeLocus)
 [![PyPI](https://img.shields.io/badge/pypi-yaelocus-blue.svg)](https://pypi.org/project/yaelocus/)
 
 **Author: [Yaemikoreal](https://github.com/Yaemikoreal)**
@@ -15,13 +15,13 @@
 
 - **多API轮换**：高德/百度/天地图三API智能轮换，免费额度合计21000次/日
 - **现代化CLI**：Typer + Rich 彩色输出，交互式配置向导
-- **高性能缓存**：SQLite持久化，延迟提交，写入性能提升10倍+
+- **高性能缓存**：SQLite持久化，断点续传，增量处理
 - **坐标转换**：自动转换为WGS-84坐标系
-- **交互式地图**：点聚类 + 热力图
+- **交互式地图**：点聚类 + 热力图可视化
 - **多格式支持**：CSV、Excel、JSON、GeoJSON 输入输出
 - **逆地理编码**：经纬度转地址
 - **并行处理**：多线程加速批量转换
-- **断点续传**：跳过已缓存地址，增量处理
+- **程序化调用**：支持 `--json` 参数输出结构化数据，便于脚本和程序集成
 
 ## 项目结构
 
@@ -103,6 +103,11 @@ yaelocus run -i data/清单.xlsx -w 5
 
 # 断点续传（跳过已缓存）
 yaelocus run -i data/清单.xlsx --skip-cached
+
+# JSON输出（便于程序集成）
+yaelocus run -i data/清单.xlsx --stdout-json
+yaelocus geocode "天安门" --json
+yaelocus cache stats --json
 
 # 查看可用文件
 yaelocus files

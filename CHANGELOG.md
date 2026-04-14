@@ -5,6 +5,21 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.4.0] - 2026-04-14
+
+### 新增
+- `--stdout-json` 参数：run 命令输出结构化 JSON，便于 AI 程序解析
+- `--json/-j` 参数：cache stats 命令支持 JSON 输出
+- 统一错误输出格式：JSON 结构化错误信息
+
+### 优化
+- HTTP Session 复用：减少 TCP 连接开销，性能提升 20-50%
+- 重试机制：网络错误自动重试（最多 3 次，指数退避）
+- 批量缓存预查询：`get_batch()` 方法减少数据库往返次数
+
+### 变更
+- `MAX_RETRIES` 配置从 1 改为 3
+
 ## [1.3.1] - 2026-04-14
 
 ### 变更

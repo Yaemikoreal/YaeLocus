@@ -33,7 +33,7 @@ from .logger import APILogger
 from .map_visualizer import create_map
 from .models import GeocodeResult, APILog, APIConfig
 
-__version__ = "1.3.1"
+__version__ = "1.4.0"
 __all__ = [
     "Geocoder",
     "CacheManager",
