@@ -5,6 +5,12 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.3.1] - 2026-04-14
+
+### 变更
+- PyPI 包名统一为 `yaelocus`
+- 安装方式简化：`pip install yaelocus`
+
 ## [1.3.0] - 2026-04-13
 
 ### 新增
