@@ -53,7 +53,7 @@ class Config:
     # 请求配置
     REQUEST_DELAY: float = 0.1  # 请求间隔(秒)
     REQUEST_TIMEOUT: int = 10  # 超时时间(秒)
-    MAX_RETRIES: int = 1  # 最大重试次数
+    MAX_RETRIES: int = 3  # 最大重试次数（网络错误时）
 
     # API优先级顺序
     API_PRIORITY: List[str] = ["amap", "tianditu", "baidu"]

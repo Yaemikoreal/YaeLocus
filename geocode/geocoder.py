@@ -8,6 +8,7 @@ import time
 from typing import Dict, List, Optional
 
 import requests
+from requests.adapters import HTTPAdapter
 
 from .cache import CacheManager
 from .config import Config
@@ -20,7 +21,7 @@ class Geocoder:
     """
     地理编码器
 
-    支持多API轮换、智能缓存、限流控制
+    支持多API轮换、智能缓存、限流控制、HTTP连接复用、重试机制
     """
 
     def __init__(
@@ -44,12 +45,57 @@ class Geocoder:
         self._request_count = 0
         self._success_count = 0
 
+        # HTTP Session 复用（性能优化）
+        self._session = requests.Session()
+        adapter = HTTPAdapter(
+            pool_connections=10,
+            pool_maxsize=20,
+            max_retries=0  # 重试逻辑在内部实现
+        )
+        self._session.mount('http://', adapter)
+        self._session.mount('https://', adapter)
+
     def _rate_limit(self) -> None:
         """请求限流"""
         elapsed = time.time() - self._last_request_time
         if elapsed < Config.REQUEST_DELAY:
             time.sleep(Config.REQUEST_DELAY - elapsed)
         self._last_request_time = time.time()
+
+    def _api_call_with_retry(
+        self,
+        url: str,
+        params: dict,
+        max_retries: int = 3
+    ) -> Optional[requests.Response]:
+        """
+        带重试的 API 调用
+
+        仅对网络错误重试，不对 API 返回错误重试
+
+        Args:
+            url: API 端点 URL
+            params: 请求参数
+            max_retries: 最大重试次数
+
+        Returns:
+            Response 对象或 None
+        """
+        retry_delay = 1.0  # 初始重试延迟
+
+        for attempt in range(max_retries):
+            try:
+                self._rate_limit()
+                response = self._session.get(url, params=params, timeout=Config.REQUEST_TIMEOUT)
+                return response
+            except (requests.Timeout, requests.ConnectionError) as e:
+                if attempt < max_retries - 1:
+                    # 指数退避
+                    time.sleep(retry_delay * (2 ** attempt))
+                else:
+                    # 最后一次失败，抛出异常让调用方处理
+                    raise
+        return None
 
     def _build_result(
         self,
@@ -85,12 +131,11 @@ class Geocoder:
         if not Config.AMAP_KEY:
             return None
 
-        self._rate_limit()
         start_time = time.time()
 
         try:
             params = {"key": Config.AMAP_KEY, "address": address, "output": "json"}
-            response = requests.get(Config.AMAP_URL, params=params, timeout=Config.REQUEST_TIMEOUT)
+            response = self._api_call_with_retry(Config.AMAP_URL, params)
             data = response.json()
             time_cost = time.time() - start_time
 
@@ -134,12 +179,11 @@ class Geocoder:
         if not Config.TIANDITU_TK:
             return None
 
-        self._rate_limit()
         start_time = time.time()
 
         try:
             params = {"ds": f'{{"keyWord":"{address}"}}', "tk": Config.TIANDITU_TK}
-            response = requests.get(Config.TIANDITU_URL, params=params, timeout=Config.REQUEST_TIMEOUT)
+            response = self._api_call_with_retry(Config.TIANDITU_URL, params)
             data = response.json()
             time_cost = time.time() - start_time
 
@@ -180,12 +224,11 @@ class Geocoder:
         if not Config.BAIDU_AK:
             return None
 
-        self._rate_limit()
         start_time = time.time()
 
         try:
             params = {"address": address, "output": "json", "ak": Config.BAIDU_AK}
-            response = requests.get(Config.BAIDU_URL, params=params, timeout=Config.REQUEST_TIMEOUT)
+            response = self._api_call_with_retry(Config.BAIDU_URL, params)
             data = response.json()
             time_cost = time.time() - start_time
 
@@ -364,7 +407,6 @@ class Geocoder:
         from .coords import wgs84_to_gcj02
         gcj_lat, gcj_lon = wgs84_to_gcj02(lat, lon)
 
-        self._rate_limit()
         start_time = time.time()
 
         try:
@@ -375,7 +417,7 @@ class Geocoder:
                 "radius": "1000",
                 "extensions": "base"
             }
-            response = requests.get(Config.AMAP_REGEO_URL, params=params, timeout=Config.REQUEST_TIMEOUT)
+            response = self._api_call_with_retry(Config.AMAP_REGEO_URL, params)
             data = response.json()
             time_cost = time.time() - start_time
 
@@ -428,14 +470,13 @@ class Geocoder:
         if not Config.TIANDITU_TK:
             return None
 
-        self._rate_limit()
         start_time = time.time()
 
         try:
             # 天地图逆地理编码参数
             post_str = f'{{"lon":{lon},"lat":{lat},"ver":1}}'
             params = {"postStr": post_str, "type": "geodecode", "tk": Config.TIANDITU_TK}
-            response = requests.get(Config.TIANDITU_REGEO_URL, params=params, timeout=Config.REQUEST_TIMEOUT)
+            response = self._api_call_with_retry(Config.TIANDITU_REGEO_URL, params)
             data = response.json()
             time_cost = time.time() - start_time
 
@@ -484,5 +525,6 @@ class Geocoder:
 
     def close(self) -> None:
         """关闭资源"""
+        self._session.close()
         self.cache.close()
         self.logger.save()

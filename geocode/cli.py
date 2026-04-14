@@ -8,6 +8,7 @@ Windows兼容: 使用ASCII符号替代Unicode符号
 
 import sys
 import os
+import json
 from pathlib import Path
 from typing import Optional
 
@@ -45,6 +46,26 @@ console = Console(force_terminal=True)
 OK = "[OK]"
 FAIL = "[FAIL]"
 WARN = "[WARN]"
+
+
+def _print_error_json(error, command: str = "unknown") -> None:
+    """
+    输出 JSON 格式的错误信息
+
+    Args:
+        error: GeocodeError 实例
+        command: 命令名称
+    """
+    output = {
+        "error": {
+            "code": error.code,
+            "message": error.message,
+            "suggestion": error.suggestion
+        },
+        "command": command,
+        "status": "error"
+    }
+    print(json.dumps(output, ensure_ascii=False))
 
 
 def resolve_path(file_path: str) -> Path:
@@ -151,6 +172,11 @@ def run(
         "-v", "--verbose",
         help="显示详细日志信息"
     ),
+    stdout_json: bool = typer.Option(
+        False,
+        "--stdout-json",
+        help="输出结果到 stdout (JSON 格式，适合 AI 程序解析)"
+    ),
 ):
     """
     执行批量地理编码
@@ -164,29 +190,35 @@ def run(
         yaelocus run -i data/清单.xlsx -f xlsx       # 输出 Excel
         yaelocus run -i data/清单.xlsx -w 5          # 5线程并行
         yaelocus run -i data/清单.xlsx --skip-cached # 断点续传
+        yaelocus run -i data/清单.xlsx --stdout-json # JSON 输出到 stdout
     """
-    # 显示标题
-    console.print(Panel.fit(
-        f"[bold blue]YaeLocus[/bold blue] [dim]v{__version__}[/dim]\n"
-        f"[dim]地址转经纬度工具[/dim]",
-        border_style="blue"
-    ))
+    # 非 stdout_json 模式时显示标题
+    if not stdout_json:
+        console.print(Panel.fit(
+            f"[bold blue]YaeLocus[/bold blue] [dim]v{__version__}[/dim]\n"
+            f"[dim]地址转经纬度工具[/dim]",
+            border_style="blue"
+        ))
 
-    # 首次运行欢迎提示
+    # 首次运行欢迎提示（仅非 stdout_json 模式）
     env_path = PROJECT_DIR / ".env"
-    if not env_path.exists():
+    if not stdout_json and not env_path.exists():
         console.print(f"\n[dim]首次使用？欢迎！如果觉得有用，欢迎给项目点个 ⭐️[/dim]")
         console.print(f"[dim]GitHub: https://github.com/Yaemikoreal/YaeLocus[/dim]\n")
 
     # 检查配置
     if not Config.validate():
-        console.print(f"\n[red][FAIL] 错误 [{NO_API_KEY.code}][/red]")
-        console.print(f"   {NO_API_KEY.message}")
-        console.print(f"\n[yellow][TIP] 建议:[/yellow] {NO_API_KEY.suggestion}")
+        if stdout_json:
+            _print_error_json(NO_API_KEY, "run")
+        else:
+            console.print(f"\n[red][FAIL] 错误 [{NO_API_KEY.code}][/red]")
+            console.print(f"   {NO_API_KEY.message}")
+            console.print(f"\n[yellow][TIP] 建议:[/yellow] {NO_API_KEY.suggestion}")
         raise typer.Exit(1)
 
     available_apis = Config.get_available_apis()
-    console.print(f"[green][OK][/green] 可用API: {', '.join(available_apis)}")
+    if not stdout_json:
+        console.print(f"[green][OK][/green] 可用API: {', '.join(available_apis)}")
 
     # 设置默认路径
     input_path = resolve_path(str(input))
@@ -197,8 +229,11 @@ def run(
 
     # 检查输入文件
     if not input_path.exists():
-        console.print(f"\n[red][FAIL] 错误 [{FILE_NOT_FOUND.code}][/red]")
-        console.print(f"   {FILE_NOT_FOUND.message}: {input_path}")
+        if stdout_json:
+            _print_error_json(FILE_NOT_FOUND, "run")
+        else:
+            console.print(f"\n[red][FAIL] 错误 [{FILE_NOT_FOUND.code}][/red]")
+            console.print(f"   {FILE_NOT_FOUND.message}: {input_path}")
         raise typer.Exit(1)
 
     # 初始化缓存
@@ -209,12 +244,14 @@ def run(
     )
 
     cache_stats = cache_manager.get_stats()
-    console.print(f"[green][OK][/green] 缓存状态: {cache_stats['total_entries']} 条记录")
+    if not stdout_json:
+        console.print(f"[green][OK][/green] 缓存状态: {cache_stats['total_entries']} 条记录")
 
     # 清理过期缓存
     if cleanup:
         cleaned = cache_manager.cleanup()
-        console.print(f"[yellow]清理过期缓存: {cleaned} 条[/yellow]")
+        if not stdout_json:
+            console.print(f"[yellow]清理过期缓存: {cleaned} 条[/yellow]")
 
     # 加载地址数据
     import pandas as pd
@@ -228,17 +265,28 @@ def run(
             df = pd.read_csv(input_path, encoding="utf-8-sig")
 
         if column not in df.columns:
-            console.print(f"\n[red][FAIL] 错误 [{COLUMN_NOT_FOUND.code}][/red]")
-            console.print(f"   列 '{column}' 不存在")
-            console.print(f"   可用列: {list(df.columns)}")
-            console.print(f"\n[yellow][TIP] 建议:[/yellow] {COLUMN_NOT_FOUND.suggestion}")
+            if stdout_json:
+                _print_error_json(COLUMN_NOT_FOUND, "run")
+            else:
+                console.print(f"\n[red][FAIL] 错误 [{COLUMN_NOT_FOUND.code}][/red]")
+                console.print(f"   列 '{column}' 不存在")
+                console.print(f"   可用列: {list(df.columns)}")
+                console.print(f"\n[yellow][TIP] 建议:[/yellow] {COLUMN_NOT_FOUND.suggestion}")
             cache_manager.close()
             raise typer.Exit(1)
 
         addresses = df[column].dropna().astype(str).tolist()
     except Exception as e:
-        console.print(f"\n[red][FAIL] 读取文件失败[/red]")
-        console.print(f"   {str(e)}")
+        if stdout_json:
+            error_output = {
+                "error": {"code": "FILE_READ_ERROR", "message": str(e)},
+                "command": "run",
+                "status": "error"
+            }
+            print(json.dumps(error_output, ensure_ascii=False))
+        else:
+            console.print(f"\n[red][FAIL] 读取文件失败[/red]")
+            console.print(f"   {str(e)}")
         cache_manager.close()
         raise typer.Exit(1)
 
@@ -333,7 +381,50 @@ def run(
     # 手动提交缓存并关闭
     geocoder.close()
 
-    # 保存结果
+    # 计算统计信息
+    success_count = len([r for r in results if r.get("success")])
+    api_stats = api_logger.get_stats()
+    cache_hit_rate = cache_stats['hit_rate']
+
+    # stdout JSON 输出模式
+    if stdout_json:
+        output_data = []
+        for r in results:
+            output_data.append({
+                "original_address": r.get("original_address", ""),
+                "formatted_address": r.get("formatted_address", ""),
+                "longitude": r.get("longitude"),
+                "latitude": r.get("latitude"),
+                "province": r.get("province", ""),
+                "city": r.get("city", ""),
+                "district": r.get("district", ""),
+                "source": r.get("source", ""),
+                "coordinate_system": r.get("coordinate_system", ""),
+                "success": r.get("success", False)
+            })
+
+        json_output = {
+            "command": "run",
+            "status": "success",
+            "results": output_data,
+            "stats": {
+                "total": len(addresses),
+                "success": success_count,
+                "failed": len(addresses) - success_count,
+                "success_rate": round(success_count / len(addresses) * 100, 1) if addresses else 0,
+                "cache_hit_rate": cache_hit_rate,
+                "api_usage": api_stats.get("api_usage", {})
+            },
+            "output_files": {
+                "result": str(output_path),
+                "map": str(map_path) if success_count > 0 else None,
+                "cache": str(cache_path)
+            }
+        }
+        print(json.dumps(json_output, ensure_ascii=False))
+        return
+
+    # 正常模式：保存结果到文件
     output_data = []
     for r in results:
         output_data.append({
@@ -445,6 +536,11 @@ def cache(
         "--cache",
         help="缓存数据库文件"
     ),
+    json_output: bool = typer.Option(
+        False,
+        "--json", "-j",
+        help="JSON 格式输出"
+    ),
 ):
     """
     缓存管理
@@ -461,16 +557,30 @@ def cache(
 
     if action == "stats":
         stats = cache_manager.get_stats()
-        table = Table(title="缓存统计", show_header=True, header_style="bold cyan")
-        table.add_column("指标", style="cyan")
-        table.add_column("数值", justify="right")
-        table.add_row("缓存条目", str(stats['total_entries']))
-        table.add_row("命中次数", str(stats['hits']))
-        table.add_row("未命中次数", str(stats['misses']))
-        table.add_row("命中率", f"{stats['hit_rate']}%")
-        table.add_row("待写入", str(stats['pending_writes']))
-        table.add_row("过期条目", str(stats['expired_entries']))
-        console.print(table)
+        if json_output:
+            output = {
+                "command": "cache_stats",
+                "stats": {
+                    "total_entries": stats['total_entries'],
+                    "hits": stats['hits'],
+                    "misses": stats['misses'],
+                    "hit_rate": stats['hit_rate'],
+                    "pending_writes": stats['pending_writes'],
+                    "expired_entries": stats['expired_entries']
+                }
+            }
+            print(json.dumps(output, ensure_ascii=False))
+        else:
+            table = Table(title="缓存统计", show_header=True, header_style="bold cyan")
+            table.add_column("指标", style="cyan")
+            table.add_column("数值", justify="right")
+            table.add_row("缓存条目", str(stats['total_entries']))
+            table.add_row("命中次数", str(stats['hits']))
+            table.add_row("未命中次数", str(stats['misses']))
+            table.add_row("命中率", f"{stats['hit_rate']}%")
+            table.add_row("待写入", str(stats['pending_writes']))
+            table.add_row("过期条目", str(stats['expired_entries']))
+            console.print(table)
 
     elif action == "clear":
         count = cache_manager.count()

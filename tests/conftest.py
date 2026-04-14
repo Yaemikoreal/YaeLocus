@@ -193,14 +193,20 @@ def mock_config_only_baidu(monkeypatch):
 @pytest.fixture
 def mock_requests():
     """
-    Mock requests 模块
+    Mock requests Session（支持 Session 复用）
 
     使用方法:
         def test_example(self, mock_requests):
             mock_requests.get.return_value.json.return_value = {"status": "1"}
     """
-    with patch('geocode.geocoder.requests') as mock:
-        yield mock
+    # 创建 mock session 对象
+    mock_session = Mock()
+    mock_session.mount = Mock()
+    mock_session.close = Mock()
+
+    # 使用 patch 直接 mock geocoder 模块中的 requests.Session
+    with patch('geocode.geocoder.requests.Session', return_value=mock_session):
+        yield mock_session
 
 
 @pytest.fixture

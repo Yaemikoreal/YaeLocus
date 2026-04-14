@@ -19,7 +19,7 @@ import sqlite3
 import time
 import threading
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 
 class CacheManager:
@@ -155,6 +155,56 @@ class CacheManager:
                 self._rebuild_db()
                 self._misses += 1
                 return None
+
+    def get_batch(self, addresses: List[str]) -> Dict[str, Optional[Dict]]:
+        """
+        批量获取缓存，减少数据库往返
+
+        Args:
+            addresses: 地址列表
+
+        Returns:
+            {address: result_dict or None} 映射
+        """
+        if not addresses:
+            return {}
+
+        keys = [self._normalize_key(addr) for addr in addresses]
+
+        with self._lock:
+            try:
+                # 使用 IN 查询一次性获取所有结果
+                placeholders = ','.join(['?' for _ in keys])
+                rows = self._conn.execute(
+                    f"SELECT key, data, expires_at FROM cache WHERE key IN ({placeholders})",
+                    keys
+                ).fetchall()
+
+                # 构建结果映射
+                results = {}
+                row_map = {row['key']: row for row in rows}
+
+                for addr, key in zip(addresses, keys):
+                    if key in row_map:
+                        row = row_map[key]
+                        # 检查过期
+                        if row['expires_at'] and row['expires_at'] < time.time():
+                            results[addr] = None
+                            self._misses += 1
+                        else:
+                            results[addr] = json.loads(row['data'])
+                            self._hits += 1
+                    else:
+                        results[addr] = None
+                        self._misses += 1
+
+                return results
+
+            except sqlite3.DatabaseError:
+                # 数据库损坏，尝试恢复
+                self._rebuild_db()
+                self._misses += len(addresses)
+                return {addr: None for addr in addresses}
 
     def set(self, address: str, result: Dict, ttl: float = None) -> None:
         """

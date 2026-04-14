@@ -434,16 +434,11 @@ class TestLoggerIntegration:
     def test_logger_used_by_geocoder(self, mock_requests, mock_config_valid, temp_cache, temp_logger):
         """Geocoder 使用 Logger"""
         from geocode.geocoder import Geocoder
+        from tests.fixtures.api_responses import AMAP_SUCCESS_RESPONSE_SIMPLE
 
         mock_response = Mock()
         mock_response.status_code = 200
-        mock_response.json.return_value = {
-            "status": "1",
-            "geocodes": [{
-                "formatted_address": "北京市朝阳区",
-                "location": "116.4853,39.9289"
-            }]
-        }
+        mock_response.json.return_value = AMAP_SUCCESS_RESPONSE_SIMPLE
         mock_requests.get.return_value = mock_response
 
         geocoder = Geocoder(temp_cache, temp_logger)
@@ -456,16 +451,11 @@ class TestLoggerIntegration:
     def test_logger_records_api_name(self, mock_requests, mock_config_valid, temp_cache, temp_logger):
         """记录正确的 API 名称"""
         from geocode.geocoder import Geocoder
+        from tests.fixtures.api_responses import AMAP_SUCCESS_RESPONSE_SIMPLE
 
         mock_response = Mock()
         mock_response.status_code = 200
-        mock_response.json.return_value = {
-            "status": "1",
-            "geocodes": [{
-                "formatted_address": "北京市朝阳区",
-                "location": "116.4853,39.9289"
-            }]
-        }
+        mock_response.json.return_value = AMAP_SUCCESS_RESPONSE_SIMPLE
         mock_requests.get.return_value = mock_response
 
         geocoder = Geocoder(temp_cache, temp_logger)
@@ -478,16 +468,14 @@ class TestLoggerIntegration:
     def test_logger_records_time_cost(self, mock_requests, mock_config_valid, temp_cache, temp_logger):
         """记录耗时"""
         from geocode.geocoder import Geocoder
+        from tests.fixtures.api_responses import AMAP_SUCCESS_RESPONSE_SIMPLE
         import time
 
         def slow_request(*args, **kwargs):
             time.sleep(0.1)
             mock_response = Mock()
             mock_response.status_code = 200
-            mock_response.json.return_value = {
-                "status": "1",
-                "geocodes": [{"location": "116.0,39.0"}]
-            }
+            mock_response.json.return_value = AMAP_SUCCESS_RESPONSE_SIMPLE
             return mock_response
 
         mock_requests.get.side_effect = slow_request
