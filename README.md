@@ -33,6 +33,8 @@ geocode-tool/
 │   ├── cache.py       # SQLite缓存（~180行）
 │   ├── errors.py      # 异常定义
 │   └── ...
+├── skills/            # Claude Code Skills
+│   └── yaelocus.md    # AI调用技能定义
 ├── install.bat        # Windows一键安装
 ├── uninstall.bat      # 卸载脚本
 ├── .env.example       # API密钥模板
@@ -40,6 +42,24 @@ geocode-tool/
 ├── LICENSE            # MIT许可证
 └── pyproject.toml     # 项目配置
 ```
+
+## Claude Code Skill
+
+本项目提供 Claude Code Skill，便于 AI 助手直接调用地理编码功能。
+
+**安装方式**：
+```bash
+cp skills/yaelocus.md ~/.claude/skills/
+```
+
+**功能**：
+- 地址转经纬度（批量/单个）
+- 逆地理编码（经纬度转地址）
+- 坐标系转换
+- 缓存管理
+- 结构化 JSON 输出（`--stdout-json` / `--json`）
+
+**触发条件**：当用户要求地址转换、批量地理编码、经纬度查询时自动触发。
 
 ## 快速开始
 
