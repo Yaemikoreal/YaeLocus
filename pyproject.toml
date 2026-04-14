@@ -1,5 +1,5 @@
 [project]
-name = "geocode-tool"
+name = "yaelocus"
 dynamic = ["version"]
 description = "Address to coordinates tool with multi-API support"
 readme = "README.md"

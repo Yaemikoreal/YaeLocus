@@ -2,7 +2,7 @@
 
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Version: 1.3.0](https://img.shields.io/badge/version-1.3.0-green.svg)](https://github.com/Yaemikoreal/YaeLocus)
+[![Version: 1.3.1](https://img.shields.io/badge/version-1.3.1-green.svg)](https://github.com/Yaemikoreal/YaeLocus)
 [![PyPI](https://img.shields.io/badge/pypi-yaelocus-blue.svg)](https://pypi.org/project/yaelocus/)
 
 **Author: [Yaemikoreal](https://github.com/Yaemikoreal)**
