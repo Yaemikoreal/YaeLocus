@@ -48,6 +48,8 @@ test.db-wal
 test.db-shm
 
 # Project specific
+data/*
+!data/.gitkeep
 output/*.csv
 output/*.json
 output/*.html
