@@ -97,6 +97,7 @@ plans/
 # 临时文件和报告（不发布）
 *.md
 !README.md
+!README_EN.md
 !CHANGELOG.md
 !LICENSE.md
 !skills/*.md
