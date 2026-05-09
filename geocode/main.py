@@ -77,8 +77,8 @@ def save_results(results: List[dict], output_csv: str) -> None:
 
 def main(
     input_file: str = "data/清单.xlsx",
-    output_csv: str = "output/地址_经纬度_结果.csv",
-    output_map: str = "output/地图输出.html",
+    output_csv: str = "",
+    output_map: str = "",
     cache_file: str = "output/geocache.db",
     log_file: str = "output/api调用日志.csv",
     address_column: str = "地址",
@@ -123,6 +123,13 @@ def main(
         default_ttl=cache_ttl,
         batch_size=batch_size
     )
+
+    # 根据输入文件名确定输出文件路径
+    stem = Path(input_file).stem or "result"
+    if not output_csv:
+        output_csv = f"output/{stem}.csv"
+    if not output_map:
+        output_map = f"output/{stem}_map.html"
 
     # 显示缓存状态
     cache_stats = cache_manager.get_stats()

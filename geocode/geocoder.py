@@ -4,6 +4,8 @@
 支持高德、天地图、百度三个API的智能轮换
 """
 
+import os
+import threading
 import time
 from typing import Dict, List, Optional
 
@@ -44,6 +46,7 @@ class Geocoder:
         self._last_request_time = 0.0
         self._request_count = 0
         self._success_count = 0
+        self._counter_lock = threading.Lock()
 
         # HTTP Session 复用（性能优化）
         self._session = requests.Session()
@@ -268,42 +271,90 @@ class Geocoder:
 
     def geocode(self, address: str) -> Dict:
         """
-        地理编码单个地址
+        地理编码单个地址（集成预处理和验证）
 
         Args:
             address: 地址字符串
 
         Returns:
-            地理编码结果字典
+            地理编码结果字典（含 confidence 字段）
         """
-        if not address or not address.strip():
-            return {"success": False, "original_address": address, "error": "Empty address"}
+        # === 预处理阶段 ===
+        from .preprocessing import InvalidAddressFilter, AddressNormalizer
+        from .validation import ConfidenceValidator
 
-        self._request_count += 1
+        # 1. 无效数据检查
+        filter_obj = InvalidAddressFilter()
+        is_valid, reason = filter_obj.is_valid(address)
+        if not is_valid:
+            return {
+                "success": False,
+                "original_address": str(address),
+                "error": f"无效地址: {reason}",
+                "confidence": {"total": 0, "issues": [reason], "is_trustworthy": False}
+            }
 
-        # 检查缓存
-        cached = self.cache.get(address)
+        # 2. 地址标准化和省份推断
+        normalizer = AddressNormalizer()
+        normalized, meta = normalizer.normalize(str(address))
+        province_hint = meta.get("province_hint")
+
+        if not normalized or not normalized.strip():
+            return {"success": False, "original_address": str(address), "error": "Empty address"}
+
+        with self._counter_lock:
+            self._request_count += 1
+
+        # 检查缓存（使用标准化地址）
+        cached = self.cache.get(normalized)
         if cached is not None:
+            # 添加置信度标记（缓存结果视为可信）
+            if "confidence" not in cached:
+                cached["confidence"] = {"total": 100, "issues": [], "is_trustworthy": True}
             return cached
 
-        # 按优先级尝试各API
+        # 按优先级尝试各API（使用标准化地址）
         for api_name in Config.API_PRIORITY:
             method = getattr(self, f"_geocode_{api_name}", None)
             if method:
-                result = method(address)
+                result = method(normalized)  # 使用标准化地址调用API
                 if result:
                     result.success = True
-                    self._success_count += 1
+                    with self._counter_lock:
+                        self._success_count += 1
                     result_dict = result.to_dict()
-                    # 写入缓存
-                    self.cache.set(address, result_dict, self._cache_ttl)
+
+                    # === 结果验证阶段 ===
+                    validator = ConfidenceValidator()
+                    confidence = validator.validate(
+                        str(address),  # 原始地址
+                        result_dict,
+                        province_hint
+                    )
+
+                    # 添加置信度字段
+                    result_dict["confidence"] = {
+                        "total": confidence.total,
+                        "issues": confidence.issues,
+                        "is_trustworthy": confidence.is_trustworthy
+                    }
+
+                    # 低置信度警告
+                    if not confidence.is_trustworthy:
+                        result_dict["warning"] = "置信度较低，建议人工核实"
+
+                    # 写入缓存（仅使用标准化地址作为键，智能缓存键会处理变体）
+                    self.cache.set(normalized, result_dict, self._cache_ttl)
                     return result_dict
 
         # 所有API都失败
         return {
             "success": False,
-            "original_address": address,
-            "error": "All APIs failed"
+            "original_address": str(address),
+            "normalized_address": normalized,
+            "province_hint": province_hint,
+            "error": "All APIs failed",
+            "confidence": {"total": 0, "issues": ["All APIs failed"], "is_trustworthy": False}
         }
 
     def batch_geocode(self, addresses: List[str], progress: bool = True) -> List[Dict]:
@@ -320,7 +371,7 @@ class Geocoder:
         results = []
         iterator = addresses
 
-        if progress:
+        if progress and not os.environ.get('YAELOCUS_TUI'):
             try:
                 from tqdm import tqdm
                 iterator = tqdm(addresses, desc="地理编码中", unit="条")
@@ -369,7 +420,8 @@ class Geocoder:
         if not lat or not lon:
             return {"success": False, "latitude": lat, "longitude": lon, "error": "Invalid coordinates"}
 
-        self._request_count += 1
+        with self._counter_lock:
+            self._request_count += 1
 
         # 检查缓存（使用坐标作为键）
         cache_key = f"reverse_{lat:.6f}_{lon:.6f}"
@@ -384,7 +436,8 @@ class Geocoder:
                 result = method(lat, lon)
                 if result:
                     result.success = True
-                    self._success_count += 1
+                    with self._counter_lock:
+                        self._success_count += 1
                     result_dict = result.to_dict()
                     # 写入缓存
                     self.cache.set(cache_key, result_dict, self._cache_ttl)

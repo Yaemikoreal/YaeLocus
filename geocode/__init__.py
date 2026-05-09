@@ -26,19 +26,52 @@ Usage:
 
 from .cache import CacheManager
 from .config import Config
-from .coords import gcj02_to_wgs84, bd09_to_wgs84, bd09_to_gcj02, wgs84_to_gcj02
-from .errors import GeocodeError, ConfigError, APIError, FileError, NetworkError
+from .coords import bd09_to_gcj02, bd09_to_wgs84, gcj02_to_wgs84, wgs84_to_gcj02
+from .errors import APIError, ConfigError, FileError, GeocodeError, NetworkError
 from .geocoder import Geocoder
 from .logger import APILogger
-from .map_visualizer import create_map
-from .models import GeocodeResult, APILog, APIConfig
+from .map_visualizer import create_map, create_route_map
+from .models import APIConfig, APILog, GeocodeResult
+from .optimizer import ItineraryOptimizer
 
-__version__ = "1.4.0"
+# 预处理和验证模块
+from .preprocessing import AddressNormalizer, InvalidAddressFilter
+from .validation import ConfidenceScore, ConfidenceValidator, CrossProvinceChecker
+
+# 新模块 - 仅当可用时导入
+try:
+    from .ai import AIClient, ProviderConfig  # noqa: F401
+except ImportError:
+    pass
+try:
+    from .routing import DirectionsClient, RoutePlanner, RouteResult, TravelMode  # noqa: F401
+except ImportError:
+    pass
+try:
+    from .api import create_api_app, run_api_server  # noqa: F401
+except ImportError:
+    pass  # web extras 未安装时跳过
+
+# Agent 集成模块 - 供 AI Agent 使用
+from .agent import (
+    AgentError,
+    AgentResponse,
+    CommandStatus,
+    get_agent_error,
+    get_all_error_definitions,
+    get_all_schemas,
+    get_schema,
+    make_agent_response_error,
+    validate_response,
+)
+
+__version__ = "1.6.0"
 __all__ = [
     "Geocoder",
     "CacheManager",
     "APILogger",
     "create_map",
+    "create_route_map",
     "Config",
     "GeocodeResult",
     "APILog",
@@ -52,4 +85,27 @@ __all__ = [
     "APIError",
     "FileError",
     "NetworkError",
+    "AIClient",
+    "ProviderConfig",
+    "RoutePlanner",
+    "RouteResult",
+    "DirectionsClient",
+    "TravelMode",
+    "ItineraryOptimizer",
+    # 新增导出
+    "InvalidAddressFilter",
+    "AddressNormalizer",
+    "ConfidenceValidator",
+    "ConfidenceScore",
+    "CrossProvinceChecker",
+    # Agent 集成
+    "AgentResponse",
+    "AgentError",
+    "CommandStatus",
+    "get_schema",
+    "get_all_schemas",
+    "validate_response",
+    "get_agent_error",
+    "make_agent_response_error",
+    "get_all_error_definitions",
 ]

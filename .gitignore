@@ -47,16 +47,30 @@ test.db
 test.db-wal
 test.db-shm
 
+# Node.js / TUI
+node_modules/
+tui/node_modules/
+tui/dist/
+*.tsbuildinfo
+
 # Project specific
 data/*
 !data/.gitkeep
+!data/example.xlsx
 output/*.csv
 output/*.json
 output/*.html
+output/*.xlsx
 output/*.db
 output/*.db-wal
 output/*.db-shm
 !output/.gitkeep
+output/csv/*
+output/database/*
+output/log/*
+output/map/*
+output/progress/*
+output/export/*
 
 # Logs
 *.log
@@ -75,6 +89,16 @@ Desktop.ini
 .env.local
 .env.*.local
 
-# Claude
+# Claude Code（开发文档，不发布）
 .claude/
 CLAUDE.md
+plans/
+
+# 临时文件和报告（不发布）
+*.md
+!README.md
+!CHANGELOG.md
+!LICENSE.md
+!skills/*.md
+测试报告*.md
+项目优化分析报告*.md

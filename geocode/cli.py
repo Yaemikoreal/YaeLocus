@@ -9,6 +9,7 @@ Windows兼容: 使用ASCII符号替代Unicode符号
 import sys
 import os
 import json
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -26,6 +27,48 @@ from .geocoder import Geocoder
 from .logger import APILogger
 from .map_visualizer import create_map
 
+# 中国主要城市坐标表（AI 模式后备，无需 API 密钥）
+_CITY_COORDS = {
+    "北京": (39.9042, 116.4074), "上海": (31.2304, 121.4737),
+    "广州": (23.1291, 113.2644), "深圳": (22.5431, 114.0579),
+    "天津": (39.3434, 117.3616), "重庆": (29.4316, 106.9123),
+    "杭州": (30.2741, 120.1551), "南京": (32.0603, 118.7969),
+    "武汉": (30.5928, 114.3055), "成都": (30.5728, 104.0668),
+    "西安": (34.3416, 108.9398), "郑州": (34.7466, 113.6253),
+    "沈阳": (41.8057, 123.4315), "青岛": (36.0671, 120.3826),
+    "宁波": (29.8683, 121.5440), "东莞": (23.0208, 113.7518),
+    "佛山": (23.0219, 113.1214), "苏州": (31.2990, 120.5853),
+    "长沙": (28.2282, 112.9388), "合肥": (31.8206, 117.2272),
+    "大连": (38.9140, 121.6147), "福州": (26.0745, 119.2965),
+    "厦门": (24.4798, 118.0894), "哈尔滨": (45.8038, 126.5350),
+    "昆明": (25.0389, 102.7183), "贵阳": (26.6470, 106.6302),
+    "南宁": (22.8170, 108.3665), "兰州": (36.0611, 103.8343),
+    "拉萨": (29.6499, 91.1722), "乌鲁木齐": (43.8256, 87.6168),
+    "海口": (20.0440, 110.3692), "三亚": (18.2528, 109.5120),
+    "呼和浩特": (40.8422, 111.7499), "银川": (38.4863, 106.2325),
+    "西宁": (36.6173, 101.7782), "香港": (22.3193, 114.1694),
+    "澳门": (22.1987, 113.5439), "台北": (25.0330, 121.5654),
+    "雄安": (38.9107, 115.9693),
+}
+
+def _resolve_address_coords(address: str) -> Optional[dict]:
+    """解析地址为坐标，优先使用内置城市表（零成本），失败则回退到地图 API"""
+    for city_name, (lat, lon) in _CITY_COORDS.items():
+        if city_name in address:
+            return {"lat": lat, "lon": lon, "address": address}
+    try:
+        from geocode.geocoder import Geocoder
+        from geocode.cache import CacheManager as CacheMgr
+        mgr = CacheMgr()
+        geo = Geocoder(mgr)
+        result = geo.geocode(address)
+        geo.close()
+        if result.get("success"):
+            return {"lat": result["latitude"], "lon": result["longitude"], "address": address}
+    except Exception:
+        pass
+    return None
+
 # Windows兼容: 设置UTF-8环境
 if sys.platform == 'win32':
     os.environ['PYTHONIOENCODING'] = 'utf-8'
@@ -37,7 +80,7 @@ if sys.platform == 'win32':
 
 app = typer.Typer(
     name="YaeLocus",
-    help="地址转经纬度 + 地图标注工具",
+    help="地址转经纬度 | 路线规划 | AI 分析 | 行程优化",
     add_completion=False
 )
 console = Console(force_terminal=True)
@@ -74,6 +117,17 @@ def resolve_path(file_path: str) -> Path:
     if path.is_absolute():
         return path
     return PROJECT_DIR / path
+
+
+def _write_progress(progress_file: Path, data: dict) -> None:
+    """原子写入进度文件"""
+    try:
+        progress_file.parent.mkdir(parents=True, exist_ok=True)
+        tmp = progress_file.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(progress_file)
+    except Exception:
+        pass  # 进度文件写入失败不应中断主流程
 
 
 def print_version(value: bool):
@@ -222,8 +276,9 @@ def run(
 
     # 设置默认路径
     input_path = resolve_path(str(input))
-    output_path = resolve_path(str(output) if output else "output/地址_经纬度_结果.csv")
-    map_path = resolve_path(str(map_file) if map_file else "output/地图输出.html")
+    input_stem = input_path.stem if input_path.stem else "result"
+    output_path = resolve_path(str(output) if output else f"output/{input_stem}.csv")
+    map_path = resolve_path(str(map_file) if map_file else f"output/{input_stem}_map.html")
     cache_path = resolve_path(str(cache_file) if cache_file else "output/geocache.db")
     log_path = resolve_path("output/api调用日志.csv")
 
@@ -236,12 +291,16 @@ def run(
             console.print(f"   {FILE_NOT_FOUND.message}: {input_path}")
         raise typer.Exit(1)
 
-    # 初始化缓存
+    # 初始化缓存（启动看门狗定时刷新，防止崩溃时大量数据丢失）
     cache_manager = CacheManager(
         cache_file=str(cache_path),
         default_ttl=ttl,
         batch_size=batch_size
     )
+    cache_manager.start_watchdog(interval=30.0)
+
+    # 进度文件路径（用于断点续传检测）
+    progress_file = resolve_path("output/.geocode_progress.json")
 
     cache_stats = cache_manager.get_stats()
     if not stdout_json:
@@ -311,6 +370,32 @@ def run(
     console.print(f"\n[cyan]输入文件:[/cyan] {input_path}")
     console.print(f"[cyan]地址总数:[/cyan] {len(addresses)} 条")
 
+    # 检测未完成的进度文件，提示续传
+    if not stdout_json and skip_cached and progress_file.exists():
+        try:
+            prev_progress = json.loads(progress_file.read_text(encoding="utf-8"))
+            if prev_progress.get("input_file") == str(input_path) and not prev_progress.get("completed"):
+                prev_processed = prev_progress.get("processed", 0)
+                prev_total = prev_progress.get("total", 0)
+                if prev_total > 0 and prev_processed < prev_total:
+                    console.print(
+                        f"\n[yellow][!] 检测到之前中断的任务:[/yellow] "
+                        f"已完成 {prev_processed}/{prev_total} 条 "
+                        f"({prev_processed/prev_total*100:.1f}%)"
+                    )
+        except (json.JSONDecodeError, KeyError):
+            progress_file.unlink(missing_ok=True)
+
+    # 写入初始进度
+    if not stdout_json:
+        _write_progress(progress_file, {
+            "input_file": str(input_path),
+            "total": len(addresses),
+            "processed": skipped_count + len(cached_results),
+            "completed": False,
+            "last_update": time.time()
+        })
+
     # 初始化地理编码器
     api_logger = APILogger(str(log_path))
     geocoder = Geocoder(cache_manager, api_logger, cache_ttl=ttl)
@@ -328,6 +413,7 @@ def run(
 
         max_workers = min(workers, 10)
         new_results_map = {}
+        processed_since_flush = 0
 
         with Progress(
             SpinnerColumn(),
@@ -348,6 +434,17 @@ def run(
                     addr = futures[future]
                     new_results_map[addr] = future.result()
                     progress.update(task, advance=1)
+                    processed_since_flush += 1
+                    # 每处理50条更新一次进度文件
+                    if processed_since_flush >= 50:
+                        _write_progress(progress_file, {
+                            "input_file": str(input_path),
+                            "total": len(addresses),
+                            "processed": skipped_count + len(cached_results) + len(new_results_map),
+                            "completed": False,
+                            "last_update": time.time()
+                        })
+                        processed_since_flush = 0
     else:
         # 串行处理
         with Progress(
@@ -360,10 +457,22 @@ def run(
             task = progress.add_task("处理地址", total=len(addresses_to_process))
 
             new_results_map = {}
+            processed_since_flush = 0
             for addr in addresses_to_process:
                 result = geocoder.geocode(addr)
                 new_results_map[addr] = result
                 progress.update(task, advance=1)
+                processed_since_flush += 1
+                # 每处理50条更新一次进度文件
+                if processed_since_flush >= 50:
+                    _write_progress(progress_file, {
+                        "input_file": str(input_path),
+                        "total": len(addresses),
+                        "processed": skipped_count + len(cached_results) + len(new_results_map),
+                        "completed": False,
+                        "last_update": time.time()
+                    })
+                    processed_since_flush = 0
 
     # 合并结果：按原始顺序排列
     results = []
@@ -380,6 +489,16 @@ def run(
 
     # 手动提交缓存并关闭
     geocoder.close()
+
+    # 标记进度完成
+    if not stdout_json:
+        _write_progress(progress_file, {
+            "input_file": str(input_path),
+            "total": len(addresses),
+            "processed": len(addresses),
+            "completed": True,
+            "last_update": time.time()
+        })
 
     # 计算统计信息
     success_count = len([r for r in results if r.get("success")])
@@ -523,6 +642,14 @@ def run(
     if verbose:
         console.print(f"  [dim]日志: {log_path}[/dim]")
 
+    # 路线规划后处理
+    if not stdout_json:
+        console.print()
+        if typer.confirm("是否需要进行路线规划？", default=False):
+            from geocode.router import RouteWizard
+            wizard = RouteWizard(csv_path=str(output_path), map_path=None)
+            wizard.run()
+
 
 @app.command()
 def cache(
@@ -613,9 +740,9 @@ def cache(
 @app.command()
 def config():
     """
-    交互式配置API密钥
+    交互式配置向导（API 密钥 + AI 供应商）
 
-    配置高德、百度、天地图API密钥。
+    配置高德/百度/天地图 API 密钥，及 DeepSeek/Qwen/GLM/Kimi AI 供应商。
     """
     console.print(Panel.fit(
         "[bold yellow]API密钥配置[/bold yellow]",
@@ -665,9 +792,48 @@ def config():
         console.print("[green][OK] 已配置[/green]")
         existing['TIANDITU_TK'] = tianditu_key
 
+    # ---- AI 配置 ----
+    console.print("\n" + "─" * 40)
+    console.print("[bold yellow]AI 功能配置[/bold yellow]")
+    console.print("[dim]配置后可用 AI 进行路线规划、数据分析等，无需额外付费 API[/dim]\n")
+
+    enable = typer.confirm("是否启用 AI 功能?", default=existing.get("AI_ENABLED", "false").lower() == "true")
+    existing["AI_ENABLED"] = "true" if enable else "false"
+
+    if enable:
+        from geocode.ai.providers import BUILTIN_PROVIDERS
+
+        console.print("\n[cyan]选择 AI 供应商:[/cyan]")
+        for i, p in enumerate(BUILTIN_PROVIDERS, 1):
+            status = "[已配置]" if existing.get(p.api_key_env) else "[未配置]"
+            console.print(f"  {i}. {p.display_name} ({p.name}) {status}")
+
+        provider_input = typer.prompt(
+            "输入供应商编号或名称",
+            default=existing.get("AI_PROVIDER", "deepseek")
+        )
+        existing["AI_PROVIDER"] = provider_input
+
+        for p in BUILTIN_PROVIDERS:
+            current = existing.get(p.api_key_env, "")
+            key = typer.prompt(
+                f"{p.display_name} API Key (留空跳过)",
+                default=current,
+                show_default=False,
+            )
+            if key:
+                existing[p.api_key_env] = key
+
+        model = typer.prompt(
+            "AI 模型名（留空使用供应商默认）",
+            default=existing.get("AI_MODEL", ""),
+            show_default=False,
+        )
+        existing["AI_MODEL"] = model
+
     # 保存配置
     with open(env_path, 'w', encoding='utf-8') as f:
-        f.write("# API密钥配置\n")
+        f.write("# 配置\n")
         for key, val in existing.items():
             f.write(f"{key}={val}\n")
 
@@ -692,7 +858,7 @@ def doctor():
     env_path = PROJECT_DIR / ".env"
     if not env_path.exists():
         console.print("[red][FAIL][/red] .env 文件不存在")
-        issues.append("运行 'geocode-tool config' 创建配置")
+        issues.append("运行 'config' 创建配置")
     else:
         console.print("[green][OK][/green] .env 文件存在")
 
@@ -700,9 +866,20 @@ def doctor():
     apis = Config.get_available_apis()
     if not apis:
         console.print("[red][FAIL][/red] 未配置任何API密钥")
-        issues.append("运行 'geocode-tool config' 配置密钥")
+        issues.append("运行 'config' 配置密钥")
     else:
         console.print(f"[green][OK][/green] 已配置API: {', '.join(apis)}")
+
+    # 检查 AI 配置
+    from geocode.ai.providers import get_all_providers
+    ai_providers = get_all_providers()
+    configured_ais = [p.display_name for p in ai_providers if p.is_available]
+    if configured_ais:
+        console.print(f"[green][OK][/green] AI 供应商已配置: {', '.join(configured_ais)}")
+    else:
+        console.print("[yellow][WARN][/yellow] 未配置 AI 供应商")
+        if Config.AI_ENABLED:
+            issues.append("AI 已启用但未配置 API Key，运行 'config' 配置")
 
     # 检查缓存目录
     output_dir = PROJECT_DIR / "output"
@@ -988,7 +1165,7 @@ def convert(
         yaelocus convert 39.9 116.4 --from gcj02 --to wgs84
         yaelocus convert 39.9 116.4 --from bd09 --to wgs84 --json
     """
-    from .coords import gcj02_to_wgs84, bd09_to_wgs84, bd09_to_gcj02
+    from .coords import gcj02_to_wgs84, bd09_to_wgs84, bd09_to_gcj02, wgs84_to_gcj02
 
     # 转换逻辑
     result_lat, result_lon = lat, lon
@@ -1006,10 +1183,7 @@ def convert(
     elif from_sys == "bd09" and to_sys == "gcj02":
         result_lat, result_lon = bd09_to_gcj02(lat, lon)
     elif from_sys == "wgs84" and to_sys == "gcj02":
-        # WGS-84 转 GCJ-02 需要反向计算
-        console.print("[yellow][WARN] wgs84 -> gcj02 转换暂不支持[/yellow]")
-        console.print("[dim]建议使用 gcj02_to_wgs84 或 bd09_to_wgs84[/dim]")
-        raise typer.Exit(1)
+        result_lat, result_lon = wgs84_to_gcj02(lat, lon)
     else:
         console.print(f"[red][FAIL] 不支持的转换: {from_sys} -> {to_sys}[/red]")
         raise typer.Exit(1)
@@ -1202,6 +1376,166 @@ def list_files(
         yaelocus files --detail     # 显示地址数量
     """
     _list_files(path, detail)
+
+
+# ============================================
+# AI 命令组
+# ============================================
+
+@app.command("ai")
+def ai_chat(
+    message: str = typer.Argument(
+        ...,
+        help="发送给 AI 的消息内容"
+    ),
+    input_file: Path = typer.Option(
+        None,
+        "-i", "--input",
+        help="附加上下文文件（CSV/JSON），将文件内容作为上下文发送"
+    ),
+    system: str = typer.Option(
+        "",
+        "--system",
+        help="自定义系统提示词"
+    ),
+    provider: str = typer.Option(
+        "",
+        "--provider",
+        help="AI 供应商 (deepseek/qwen/glm/moonshot)"
+    ),
+    model: str = typer.Option(
+        "",
+        "--model",
+        help="AI 模型名"
+    ),
+    json_output: bool = typer.Option(
+        False,
+        "--json", "-j",
+        help="JSON 格式输出"
+    ),
+):
+    """与 AI 对话
+
+    使用已配置的 AI 供应商进行对话。首次使用前需先配置:
+      yaelocus config
+
+    示例:
+        yaelocus ai "分析这些地址的地理分布特征"
+        yaelocus ai -i output/地址_经纬度_结果.csv "分析这些地址"
+        yaelocus ai --provider qwen "你好"
+    """
+    if not Config.AI_ENABLED:
+        console.print("[red][FAIL] AI 功能未启用[/red]")
+        console.print("[yellow][TIP] 在 .env 中设置 AI_ENABLED=true[/yellow]")
+        console.print("[yellow][TIP] 并配置至少一个 AI 供应商 API Key[/yellow]")
+        raise typer.Exit(1)
+
+    # 构建消息
+    messages = []
+
+    # 系统消息
+    sys_msg = system.strip() or "你是一个有帮助的助手。请用中文回答。"
+    messages.append({"role": "system", "content": sys_msg})
+
+    # 如果提供了输入文件，读取内容作为上下文
+    user_content = message
+    if input_file:
+        input_path = resolve_path(str(input_file))
+        if input_path.exists():
+            try:
+                with open(input_path, "r", encoding="utf-8") as f:
+                    file_content = f.read()
+                if len(file_content) > 10000:
+                    file_content = file_content[:10000] + "\n...(截断)"
+                user_content = f"以下是参考数据:\n{file_content}\n\n{message}"
+            except Exception as e:
+                console.print(f"[yellow][WARN] 读取文件失败: {e}[/yellow]")
+        else:
+            console.print(f"[yellow][WARN] 文件不存在: {input_path}[/yellow]")
+
+    messages.append({"role": "user", "content": user_content})
+
+    # 初始化 AI 客户端
+    try:
+        from geocode.ai import AIClient
+
+        client_kwargs = {}
+        if provider:
+            client_kwargs["provider"] = provider
+        if model:
+            client_kwargs["model"] = model
+
+        client = AIClient(**client_kwargs)
+    except Exception as e:
+        console.print(f"[red][FAIL] AI 客户端初始化失败: {e}[/red]")
+        raise typer.Exit(1)
+
+    # 调用 AI
+    with console.status("[cyan]AI 思考中...[/cyan]"):
+        try:
+            resp = client.chat(messages=messages)
+            answer = resp["choices"][0]["message"]["content"].strip()
+        except Exception as e:
+            console.print(f"[red][FAIL] AI 调用失败: {e}[/red]")
+            client.close()
+            raise typer.Exit(1)
+
+    client.close()
+
+    if json_output:
+        output = {
+            "provider": provider or Config.AI_PROVIDER,
+            "model": model or Config.AI_MODEL or "",
+            "response": answer,
+        }
+        print(json.dumps(output, ensure_ascii=False))
+    else:
+        console.print(Panel(
+            answer,
+            title=f"[bold blue]{provider or 'AI'} 回复[/bold blue]",
+            border_style="blue",
+        ))
+
+
+
+
+
+
+
+@app.command('route')
+def route_command(
+    input_file: Path = typer.Option(
+        ...,
+        '-i', '--input',
+        help='地理编码结果文件（CSV/JSON）'
+    ),
+    map_file: Path = typer.Option(
+        None,
+        '-o', '--output',
+        help='输出地图路径（默认 output/路线规划_地图.html）'
+    ),
+):
+    """交互式路线规划（整体模块）
+
+    基于地理编码结果进行 AI 路线规划。
+    交互式引导：问询起点、数量、出行方式，
+    AI 流式规划路线并输出到地图。
+
+    示例:
+        yaelocus route -i output/地址_经纬度_结果.csv
+    """
+    from geocode.router import RouteWizard
+
+    input_path = resolve_path(str(input_file))
+    if not input_path.exists():
+        console.print(f'[red][FAIL] 文件不存在: {input_path}[/red]')
+        raise typer.Exit(1)
+
+    wizard = RouteWizard(
+        csv_path=str(input_path),
+        map_path=str(resolve_path(str(map_file))) if map_file else None,
+    )
+    wizard.run()
 
 
 if __name__ == "__main__":

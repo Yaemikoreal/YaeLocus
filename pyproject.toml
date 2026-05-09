@@ -36,10 +36,13 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=7.0.0", "ruff>=0.1.0"]
+dev = ["pytest>=7.0.0", "ruff>=0.1.0", "httpx>=0.27.0"]
+ai = ["httpx>=0.27.0"]  # AI 模块（可选，也可使用 requests）
+web = ["fastapi>=0.100.0", "uvicorn>=0.23.0", "python-multipart>=0.0.6"]  # Web API 服务器
+beta = ["yaelocus[ai,web]"]  # 完整 Beta 版（含所有可选功能）
 
 [project.scripts]
-yaelocus = "geocode.cli:app"
+yaelocus = "geocode.cli.app:app"
 
 [project.urls]
 Homepage = "https://github.com/Yaemikoreal/YaeLocus"

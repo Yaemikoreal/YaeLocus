@@ -9,13 +9,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Dict
 
+from .config import OutputPaths
 from .models import APILog
 
 
 class APILogger:
     """API调用日志记录器"""
 
-    def __init__(self, log_file: str = "output/api调用日志.csv"):
+    def __init__(self, log_file: str = str(OutputPaths.LOG / "api调用日志.csv")):
         self.log_file = Path(log_file)
         self._logs: List[APILog] = []
         self._ensure_dir()

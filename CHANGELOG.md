@@ -5,6 +5,43 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.6.0] - 2026-05-09
+
+### 新增
+- **Agent 集成模块** (`geocode/agent/`): JSON Schema 定义 + 错误恢复路径
+- **HTTP API 端点**: `/api/schema`, `/api/errors` 供 AI Agent 查询
+- **Skill 文件增强**: `skills/yaelocus.md` 完整 Agent 使用手册
+- **发布版本拆分**: CLI-only 稳定版 vs 完整 Beta 版 (extras 分组)
+
+### extras 分组
+- `[ai]` - AI 功能 (httpx)
+- `[web]` - Web API 服务器 (fastapi/uvicorn)
+- `[beta]` - 完整 Beta 版 (AI + Web)
+- `[dev]` - 开发测试工具
+
+### 安装方式
+```bash
+pip install yaelocus              # CLI-only 稳定版
+pip install "yaelocus[beta]"      # 完整 Beta 版
+```
+
+### 文档
+- Skill 文件新增：工具检测、API Key 配置、完整命令参考、路径说明
+- 错误恢复协议：Agent 可自动处理 `NO_API_KEY`, `COLUMN_NOT_FOUND` 等错误
+
+## [1.5.0] - 2026-04-20
+
+### 新增
+- **命令分组重构**: `geocode`, `map`, `ai`, `config` 四组 Typer 子应用
+- **TUI 双模式**: Ink TUI (React) + Rich TUI 回退
+- **API 服务器**: FastAPI headless 服务器，Ink TUI 后端
+- **AI 集成**: DeepSeek/Qwen/GLM/Moonshot 多供应商支持
+- **路线规划**: `ai route` 交互式路线规划向导
+
+### 变更
+- 弃用旧扁平命令，自动重定向到新分组命令
+- 入口点统一为 `yaelocus` (无参数启动 TUI)
+
 ## [1.4.0] - 2026-04-14
 
 ### 新增

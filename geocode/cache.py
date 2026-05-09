@@ -19,7 +19,9 @@ import sqlite3
 import time
 import threading
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Callable, Any
+
+from .config import OutputPaths
 
 
 class CacheManager:
@@ -48,7 +50,7 @@ class CacheManager:
 
     def __init__(
         self,
-        cache_file: str = "output/geocache.db",
+        cache_file: str = str(OutputPaths.DATABASE / "geocache.db"),
         default_ttl: float = None,
         batch_size: int = 100
     ):
@@ -69,8 +71,15 @@ class CacheManager:
         self._misses = 0
         self._conn = None
         self._lock = threading.RLock()  # 可重入锁，防止死锁
+        self._watchdog_thread = None
+        self._watchdog_stop = None
+        self._recovery_callback: Optional[Callable[[Any], None]] = None  # 恢复通知回调
 
         self._init_db()
+
+    def set_recovery_callback(self, callback: Callable[[Any], None]) -> None:
+        """设置数据库恢复通知回调"""
+        self._recovery_callback = callback
 
     def _init_db(self) -> None:
         """初始化数据库，支持损坏恢复"""
@@ -88,7 +97,18 @@ class CacheManager:
             self._rebuild_db()
 
     def _rebuild_db(self) -> None:
-        """重建损坏的数据库"""
+        """重建损坏的数据库，并发送恢复通知"""
+        # 发送恢复开始通知
+        if self._recovery_callback:
+            try:
+                self._recovery_callback({
+                    'type': 'cache_recovery',
+                    'message': '数据库锁定或损坏，正在重建...',
+                    'timestamp': time.time()
+                })
+            except Exception:
+                pass  # 回调失败不影响恢复
+
         if self._conn:
             try:
                 self._conn.close()
@@ -114,10 +134,58 @@ class CacheManager:
         self._conn.execute("PRAGMA mmap_size=268435456")
         self._conn.row_factory = sqlite3.Row
 
+        # 发送恢复完成通知
+        if self._recovery_callback:
+            try:
+                self._recovery_callback({
+                    'type': 'cache_recovery_done',
+                    'message': '数据库已恢复，缓存已清空',
+                    'timestamp': time.time()
+                })
+            except Exception:
+                pass
+
     @staticmethod
     def _normalize_key(address: str) -> str:
-        """规范化缓存键"""
-        return address.strip().lower()
+        """智能缓存键 - 处理地址变体
+
+        处理：
+        - 空格差异："深圳市南山区" vs "深圳市 南山区"
+        - 简繁差异："深圳" vs "深圳市"
+        - 省份前缀差异："广东省深圳市" vs "深圳市"
+        """
+        if not address:
+            return ""
+
+        import re
+
+        # 基础清洗
+        key = address.strip().lower()
+
+        # 去除省份前缀（统一缓存）
+        # "广东省深圳市南山区" -> "深圳市南山区"
+        province_prefixes = [
+            "广东省", "四川省", "浙江省", "江苏省",
+            "山东省", "河南省", "湖北省", "湖南省",
+            "安徽省", "福建省", "江西省", "河北省",
+            "山西省", "辽宁省", "吉林省", "黑龙江省",
+            "陕西省", "甘肃省", "青海省", "宁夏",
+            "新疆", "内蒙古", "广西", "西藏",
+            "云南", "贵州省", "海南省", "北京市",
+            "上海市", "天津市", "重庆市",
+        ]
+        for prefix in province_prefixes:
+            if key.startswith(prefix.lower()):
+                key = key[len(prefix):]
+
+        # 去除重复的"市"、"区"
+        key = re.sub(r'(市){2,}', '市', key)
+        key = re.sub(r'(区){2,}', '区', key)
+
+        # 去除多余空格
+        key = re.sub(r'\s+', '', key)
+
+        return key
 
     def get(self, address: str) -> Optional[Dict]:
         """
@@ -328,8 +396,48 @@ class CacheManager:
             except sqlite3.DatabaseError:
                 return 0
 
+    def start_watchdog(self, interval: float = 30.0) -> None:
+        """启动后台看门狗线程，定期刷新缓存
+
+        在批量操作期间确保数据定期写入磁盘，防止崩溃时大量数据丢失。
+
+        Args:
+            interval: 刷新间隔（秒），默认30秒
+        """
+        if self._watchdog_thread is not None:
+            return  # 已在运行
+
+        self._watchdog_stop = threading.Event()
+
+        def _watchdog_loop():
+            while not self._watchdog_stop.wait(interval):
+                try:
+                    with self._lock:
+                        if self._pending > 0:
+                            self._conn.commit()
+                            self._pending = 0
+                except Exception:
+                    pass  # 静默处理刷新错误，不中断主流程
+
+        self._watchdog_thread = threading.Thread(
+            target=_watchdog_loop,
+            daemon=True,
+            name="cache-watchdog"
+        )
+        self._watchdog_thread.start()
+
+    def stop_watchdog(self) -> None:
+        """停止看门狗线程"""
+        if self._watchdog_stop:
+            self._watchdog_stop.set()
+        if self._watchdog_thread:
+            self._watchdog_thread.join(timeout=5.0)
+            self._watchdog_thread = None
+            self._watchdog_stop = None
+
     def close(self) -> None:
         """关闭缓存管理器，确保数据持久化"""
+        self.stop_watchdog()
         with self._lock:  # 线程安全
             self.flush()
             if self._conn:
