@@ -1,4 +1,4 @@
-# YaeLocus - 地址转经纬度 + 路线规划 + AI 分析
+# YaeLocus
 
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
