@@ -1,7 +1,6 @@
 import { API_BASE } from './constants';
 import type {
   GeocodeResult,
-  TaskInfo,
   MapFile,
   DataFile,
   CacheStats,
@@ -61,15 +60,14 @@ export async function geocodeSingle(
   address: string,
   signal?: AbortSignal
 ): Promise<GeocodeResult> {
-  const form = new FormData();
-  form.append('address', address);
-  const url = `${API_BASE}/api/geocode/single`;
-  const res = await fetch(url, { method: 'POST', body: form, signal });
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
-    throw new ApiError(body.error || '请求失败', res.status);
-  }
-  return res.json();
+  return request<GeocodeResult>(
+    '/api/geocode/single',
+    {
+      method: 'POST',
+      body: JSON.stringify({ address }),
+    },
+    signal
+  );
 }
 
 // ── 逆地理编码 (F4) ──
@@ -119,6 +117,7 @@ export function batchGeocodeStream(
     current: number;
     success: number;
   }) => void,
+  onResult: (result: GeocodeResult) => void,
   onComplete: (taskId: string, results: GeocodeResult[]) => void,
   onError: (error: string) => void,
   signal?: AbortSignal
@@ -129,7 +128,6 @@ export function batchGeocodeStream(
   form.append('workers', workers);
 
   const url = `${API_BASE}/api/geocode/batch/stream`;
-  let lastProgress = 0;
 
   fetch(url, { method: 'POST', body: form, signal })
     .then(async (res) => {
@@ -172,9 +170,13 @@ export function batchGeocodeStream(
             if (parsed.task_id) {
               taskId = parsed.task_id;
             }
+            // 逐条 geocode 结果
+            if (parsed.type === 'geocode_result' && parsed.data) {
+              results.push(parsed.data);
+              onResult(parsed.data);
+            }
             // 任何包含 current 字段的事件都作为进度推送
             if (parsed.current !== undefined && parsed.total) {
-              lastProgress = parsed.current;
               onProgress(parsed);
             }
           } catch {

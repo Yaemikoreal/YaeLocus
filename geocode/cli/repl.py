@@ -14,7 +14,7 @@ import traceback
 from dataclasses import dataclass, field
 from io import StringIO
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, List, Literal, Optional, Tuple
 
 from rich.console import Console
 from rich.layout import Layout
@@ -410,7 +410,7 @@ class ReplSession:
         self._scroll_line = 0
         self._stick_to_bottom = True
         self._inline_suggestion: str = ""  # ghost text
-        self._modal: MapFilePicker | None = None  # modal map picker
+        self._modal: Optional[Any] = None  # modal map picker
 
         # AI 流式辅助
         self._streaming_msg_idx = -1
@@ -617,7 +617,7 @@ class ReplSession:
 
     # ── 自然语言→命令匹配 ────────────────────────────────
 
-    def _match_nl(self, text: str) -> tuple[str, list[str]] | None:
+    def _match_nl(self, text: str) -> Optional[Tuple[str, List[str]]]:
         """检测自然语言输入是否可映射为命令。返回 (cmd_hint, args) 或 None。"""
         import re as _re
         data_files = "|".join(

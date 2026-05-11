@@ -18,6 +18,7 @@ import json
 import sqlite3
 import time
 import threading
+from collections import OrderedDict
 from pathlib import Path
 from typing import Dict, List, Optional, Callable, Any
 
@@ -28,11 +29,11 @@ class CacheManager:
     """
     轻量级缓存管理器
 
-    基于SQLite的地理编码缓存，支持：
-    - 延迟提交（批量写入优化）
-    - TTL过期清理
-    - WAL模式并发优化
-    - 内存映射加速读取
+    基于SQLite + 内存 LRU 的二级地理编码缓存，支持：
+    - 内存 LRU 层（热点数据零 I/O）
+    - SQLite 持久化 + 延迟提交（批量写入优化）
+    - TTL 过期清理
+    - WAL 模式并发优化
     - 数据库损坏自动恢复
     """
 
@@ -48,11 +49,15 @@ class CacheManager:
     CREATE INDEX IF NOT EXISTS idx_expires ON cache(expires_at);
     """
 
+    # 默认内存缓存条目数
+    DEFAULT_MEM_SIZE = 2000
+
     def __init__(
         self,
         cache_file: str = str(OutputPaths.DATABASE / "geocache.db"),
         default_ttl: float = None,
-        batch_size: int = 100
+        batch_size: int = 100,
+        mem_cache_size: int = DEFAULT_MEM_SIZE,
     ):
         """
         初始化缓存管理器
@@ -61,6 +66,7 @@ class CacheManager:
             cache_file: SQLite数据库文件路径
             default_ttl: 默认过期时间(秒)，None表示永不过期
             batch_size: 批量提交阈值，达到此数量自动commit
+            mem_cache_size: 内存 LRU 缓存条目上限（默认 2000）
         """
         self._path = Path(cache_file)
         self._path.parent.mkdir(parents=True, exist_ok=True)
@@ -73,6 +79,10 @@ class CacheManager:
         self._lock = threading.RLock()  # 可重入锁，防止死锁
         self._watchdog_thread = None
         self._watchdog_stop = None
+
+        # 内存 LRU 缓存层（OrderedDict 天然支持 LRU）
+        self._mem_cache: OrderedDict = OrderedDict()
+        self._mem_maxsize = max(1, mem_cache_size)
         self._recovery_callback: Optional[Callable[[Any], None]] = None  # 恢复通知回调
 
         self._init_db()
@@ -165,14 +175,19 @@ class CacheManager:
         # 去除省份前缀（统一缓存）
         # "广东省深圳市南山区" -> "深圳市南山区"
         province_prefixes = [
+            # 完整自治区名称优先（长前缀先匹配，避免短前缀残根问题）
+            "广西壮族自治区", "新疆维吾尔自治区", "宁夏回族自治区",
+            "内蒙古自治区", "西藏自治区",
+            "香港特别行政区", "澳门特别行政区",
+            # 常规省份
             "广东省", "四川省", "浙江省", "江苏省",
             "山东省", "河南省", "湖北省", "湖南省",
             "安徽省", "福建省", "江西省", "河北省",
             "山西省", "辽宁省", "吉林省", "黑龙江省",
-            "陕西省", "甘肃省", "青海省", "宁夏",
-            "新疆", "内蒙古", "广西", "西藏",
-            "云南", "贵州省", "海南省", "北京市",
-            "上海市", "天津市", "重庆市",
+            "陕西省", "甘肃省", "青海省",
+            "云南", "贵州省", "海南省",
+            # 直辖市
+            "北京市", "上海市", "天津市", "重庆市",
         ]
         for prefix in province_prefixes:
             if key.startswith(prefix.lower()):
@@ -189,7 +204,7 @@ class CacheManager:
 
     def get(self, address: str) -> Optional[Dict]:
         """
-        获取缓存
+        获取缓存（内存 LRU → SQLite 二级查询）
 
         Args:
             address: 地址字符串
@@ -199,7 +214,19 @@ class CacheManager:
         """
         key = self._normalize_key(address)
 
-        with self._lock:  # 线程安全
+        with self._lock:
+            # 一级：内存 LRU
+            if key in self._mem_cache:
+                entry = self._mem_cache[key]
+                if entry["expires_at"] and entry["expires_at"] < time.time():
+                    del self._mem_cache[key]
+                    self._misses += 1
+                    return None
+                self._mem_cache.move_to_end(key)
+                self._hits += 1
+                return entry["data"]
+
+            # 二级：SQLite
             try:
                 row = self._conn.execute(
                     "SELECT data, expires_at FROM cache WHERE key = ?", (key,)
@@ -209,20 +236,28 @@ class CacheManager:
                     self._misses += 1
                     return None
 
-                # 检查过期
                 if row['expires_at'] and row['expires_at'] < time.time():
                     self._conn.execute("DELETE FROM cache WHERE key = ?", (key,))
                     self._misses += 1
                     return None
 
+                data = json.loads(row['data'])
                 self._hits += 1
-                return json.loads(row['data'])
+
+                # 提升到内存（LRU 淘汰最旧条目）
+                if len(self._mem_cache) >= self._mem_maxsize:
+                    self._mem_cache.popitem(last=False)
+                self._mem_cache[key] = {"data": data, "expires_at": row["expires_at"]}
+
+                return data
 
             except sqlite3.DatabaseError:
-                # 数据库损坏，尝试恢复
                 self._rebuild_db()
                 self._misses += 1
                 return None
+
+    # SQLite 默认最大变量数 999，取安全值
+    _BATCH_CHUNK_SIZE = 500
 
     def get_batch(self, addresses: List[str]) -> Dict[str, Optional[Dict]]:
         """
@@ -238,33 +273,35 @@ class CacheManager:
             return {}
 
         keys = [self._normalize_key(addr) for addr in addresses]
+        results: Dict[str, Optional[Dict]] = {}
 
         with self._lock:
             try:
-                # 使用 IN 查询一次性获取所有结果
-                placeholders = ','.join(['?' for _ in keys])
-                rows = self._conn.execute(
-                    f"SELECT key, data, expires_at FROM cache WHERE key IN ({placeholders})",
-                    keys
-                ).fetchall()
+                # 分批查询，避免超过 SQLite 变量数限制
+                for chunk_start in range(0, len(keys), self._BATCH_CHUNK_SIZE):
+                    chunk_keys = keys[chunk_start:chunk_start + self._BATCH_CHUNK_SIZE]
+                    chunk_addrs = addresses[chunk_start:chunk_start + self._BATCH_CHUNK_SIZE]
 
-                # 构建结果映射
-                results = {}
-                row_map = {row['key']: row for row in rows}
+                    placeholders = ','.join(['?' for _ in chunk_keys])
+                    rows = self._conn.execute(
+                        f"SELECT key, data, expires_at FROM cache WHERE key IN ({placeholders})",
+                        chunk_keys
+                    ).fetchall()
 
-                for addr, key in zip(addresses, keys):
-                    if key in row_map:
-                        row = row_map[key]
-                        # 检查过期
-                        if row['expires_at'] and row['expires_at'] < time.time():
+                    row_map = {row['key']: row for row in rows}
+
+                    for addr, key in zip(chunk_addrs, chunk_keys):
+                        if key in row_map:
+                            row = row_map[key]
+                            if row['expires_at'] and row['expires_at'] < time.time():
+                                results[addr] = None
+                                self._misses += 1
+                            else:
+                                results[addr] = json.loads(row['data'])
+                                self._hits += 1
+                        else:
                             results[addr] = None
                             self._misses += 1
-                        else:
-                            results[addr] = json.loads(row['data'])
-                            self._hits += 1
-                    else:
-                        results[addr] = None
-                        self._misses += 1
 
                 return results
 
@@ -289,6 +326,12 @@ class CacheManager:
         expires = now + effective_ttl if effective_ttl else None
 
         with self._lock:  # 线程安全
+            # 写入内存 LRU（LRU 淘汰最旧）
+            if result is not None:
+                if len(self._mem_cache) >= self._mem_maxsize:
+                    self._mem_cache.popitem(last=False)
+                self._mem_cache[key] = {"data": dict(result), "expires_at": expires}
+
             try:
                 self._conn.execute(
                     "INSERT OR REPLACE INTO cache (key, address, data, created_at, expires_at, source) "
@@ -297,12 +340,10 @@ class CacheManager:
                 )
 
                 self._pending += 1
-                # 达到阈值自动提交
                 if self._pending >= self._batch_size:
                     self.flush()
 
             except sqlite3.DatabaseError:
-                # 数据库损坏，尝试恢复后重试
                 self._rebuild_db()
                 self._conn.execute(
                     "INSERT OR REPLACE INTO cache (key, address, data, created_at, expires_at, source) "
@@ -324,7 +365,8 @@ class CacheManager:
     def delete(self, address: str) -> bool:
         """删除缓存"""
         key = self._normalize_key(address)
-        with self._lock:  # 线程安全
+        with self._lock:
+            self._mem_cache.pop(key, None)
             try:
                 cursor = self._conn.execute("DELETE FROM cache WHERE key = ?", (key,))
                 self._conn.commit()
@@ -335,7 +377,8 @@ class CacheManager:
 
     def clear(self) -> None:
         """清空所有缓存"""
-        with self._lock:  # 线程安全
+        with self._lock:
+            self._mem_cache.clear()
             try:
                 self._conn.execute("DELETE FROM cache")
                 self._conn.commit()
@@ -384,6 +427,8 @@ class CacheManager:
             'misses': self._misses,
             'hit_rate': hit_rate,
             'total_entries': total,
+            'mem_entries': len(self._mem_cache),
+            'mem_max': self._mem_maxsize,
             'expired_entries': expired,
             'pending_writes': self._pending
         }

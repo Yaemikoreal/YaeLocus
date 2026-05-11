@@ -3,7 +3,7 @@ import { fetchTaskStatus } from '../../lib/api'
 import { API_BASE } from '../../lib/constants'
 import type { GeocodeResult as GeocodeResultType } from '../../lib/types'
 import GeocodeResultCard from './GeocodeResult'
-import { Clock, Eye, RefreshCw, X } from 'lucide-react'
+import { Eye, RefreshCw, X } from 'lucide-react'
 
 interface LocalTask {
   id: string
@@ -42,12 +42,28 @@ export default function TaskHistory() {
     const runningTasks = tasks.filter((t) => t.status === 'running')
     if (runningTasks.length === 0) return
 
-    const timers = runningTasks.map((t) =>
-      setInterval(() => {
+    const timers: ReturnType<typeof setInterval>[] = []
+
+    for (const t of runningTasks) {
+      const timer = setInterval(() => {
+        // 检查此任务是否仍在运行（避免泄漏：已完成的任务不再轮询）
+        setTasks((prev) => {
+          const current = prev.find((p) => p.id === t.id)
+          if (!current || current.status !== 'running') return prev
+          return prev
+        })
+
         fetchTaskStatus(t.id)
           .then((data) => {
-            if (data.status === 'done' || data.status === 'error') {
-              setTasks((prev) => {
+            setTasks((prev) => {
+              const current = prev.find((p) => p.id === t.id)
+              // 任务已不在列表中或已非运行状态 → 清除此 interval
+              if (!current || current.status !== 'running') {
+                clearInterval(timer)
+                return prev
+              }
+              if (data.status === 'done' || data.status === 'error') {
+                clearInterval(timer)
                 const updated = prev.map((p) =>
                   p.id === t.id
                     ? { ...p, status: data.status, success: (data as any).success || 0, failed: (data as any).failed || 0, progress: data.total }
@@ -55,20 +71,18 @@ export default function TaskHistory() {
                 )
                 saveTasks(updated)
                 return updated
-              })
-            } else {
-              setTasks((prev) => {
-                const updated = prev.map((p) =>
-                  p.id === t.id ? { ...p, progress: data.progress } : p
-                )
-                saveTasks(updated)
-                return updated
-              })
-            }
+              }
+              const updated = prev.map((p) =>
+                p.id === t.id ? { ...p, progress: data.progress } : p
+              )
+              saveTasks(updated)
+              return updated
+            })
           })
           .catch(() => {})
       }, 3000)
-    )
+      timers.push(timer)
+    }
 
     return () => timers.forEach(clearInterval)
   }, [tasks.length])

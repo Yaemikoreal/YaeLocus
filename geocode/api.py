@@ -44,6 +44,48 @@ _ai_client: Optional[AIClient] = None
 # 后台任务追踪
 _tasks: dict = {}
 _tasks_lock = threading.Lock()
+_cleanup_started = False
+
+
+def _persist_task(task_id: str, task_data: dict) -> None:
+    """将已完成任务写入 JSON 文件，服务器重启后可恢复"""
+    try:
+        progress_dir = OutputPaths.PROGRESS
+        progress_dir.mkdir(parents=True, exist_ok=True)
+        task_file = progress_dir / f"{task_id}.json"
+        task_file.write_text(json.dumps(task_data, ensure_ascii=False, default=str), encoding="utf-8")
+    except Exception:
+        pass  # 持久化失败不影响主流程
+
+
+def _start_task_cleanup() -> None:
+    """启动后台清理线程，定期清理过期任务（超过 1 小时）"""
+    global _cleanup_started
+    if _cleanup_started:
+        return
+    _cleanup_started = True
+
+    def _cleanup_loop():
+        while True:
+            time.sleep(600)  # 每 10 分钟
+            try:
+                progress_dir = OutputPaths.PROGRESS
+                if not progress_dir.exists():
+                    continue
+                cutoff = time.time() - 3600
+                for f in progress_dir.glob("*.json"):
+                    if f.stat().st_mtime < cutoff:
+                        f.unlink()
+                with _tasks_lock:
+                    stale = [tid for tid, t in _tasks.items()
+                             if t.get("status") in ("done", "error")
+                             and t.get("_completed_at", 0) < cutoff]
+                    for tid in stale:
+                        del _tasks[tid]
+            except Exception:
+                pass
+
+    threading.Thread(target=_cleanup_loop, daemon=True).start()
 
 
 def _get_cache() -> CacheManager:
@@ -95,7 +137,12 @@ def create_api_app() -> FastAPI:
 
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
+        allow_origins=[
+            "http://localhost:5173",
+            "http://127.0.0.1:5173",
+            "http://localhost:3000",
+            "http://127.0.0.1:3000",
+        ],
         allow_methods=["*"],
         allow_headers=["*"],
     )
@@ -152,6 +199,104 @@ def create_api_app() -> FastAPI:
                 "hit_rate": stats.get("hit_rate", 0),
             },
         }
+
+    @app.post("/api/config/save")
+    async def save_config(
+        amap_key: str = Form(""),
+        baidu_ak: str = Form(""),
+        tianditu_tk: str = Form(""),
+        ai_enabled: str = Form("false"),
+        ai_provider: str = Form("deepseek"),
+        deepseek_key: str = Form(""),
+        qwen_key: str = Form(""),
+        glm_key: str = Form(""),
+        moonshot_key: str = Form(""),
+    ):
+        """保存配置到 .env 文件，仅更新非空字段"""
+        env_path = PROJECT_DIR / ".env"
+
+        # 读取现有 .env
+        existing = {}
+        if env_path.exists():
+            for line in env_path.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if "=" in line and not line.startswith("#"):
+                    k, v = line.split("=", 1)
+                    existing[k.strip()] = v.strip()
+
+        # 仅更新非空值（跳过占位符和空值）
+        updates = {
+            "AMAP_KEY": amap_key,
+            "BAIDU_AK": baidu_ak,
+            "TIANDITU_TK": tianditu_tk,
+            "AI_ENABLED": ai_enabled,
+            "AI_PROVIDER": ai_provider,
+            "DEEPSEEK_API_KEY": deepseek_key,
+            "QWEN_API_KEY": qwen_key,
+            "GLM_API_KEY": glm_key,
+            "MOONSHOT_API_KEY": moonshot_key,
+        }
+        for k, v in updates.items():
+            if v and v != "........":
+                existing[k] = v
+
+        lines = [f"{k}={v}" for k, v in existing.items()]
+        env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+        return {"success": True, "message": "配置已保存"}
+
+    @app.post("/api/config/test")
+    async def test_api_key(
+        amap_key: str = Form(""),
+        baidu_ak: str = Form(""),
+        tianditu_tk: str = Form(""),
+    ):
+        """测试 API Key 有效性"""
+        import requests as req
+        results: dict = {}
+
+        if amap_key:
+            try:
+                r = req.get("https://restapi.amap.com/v3/geocode/geo", params={
+                    "key": amap_key, "address": "北京市", "output": "JSON"
+                }, timeout=10)
+                data = r.json()
+                results["amap"] = data.get("status") == "1"
+            except Exception:
+                results["amap"] = False
+
+        if baidu_ak:
+            try:
+                r = req.get("https://api.map.baidu.com/geocoding/v3", params={
+                    "ak": baidu_ak, "address": "北京市", "output": "json"
+                }, timeout=10)
+                data = r.json()
+                results["baidu"] = data.get("status") == 0
+            except Exception:
+                results["baidu"] = False
+
+        if tianditu_tk:
+            try:
+                r = req.get("https://api.tianditu.gov.cn/geocoder", params={
+                    "tk": tianditu_tk, "ds": json.dumps({"keyWord": "北京市"}), "type": "geocode"
+                }, timeout=10)
+                data = r.json()
+                results["tianditu"] = data.get("status") == "0"
+            except Exception:
+                results["tianditu"] = False
+
+        return results
+
+    @app.post("/api/config/reload")
+    async def reload_config():
+        """重新加载 .env 配置，无需重启服务器"""
+        try:
+            import importlib
+            from . import config
+            importlib.reload(config)
+            return {"success": True, "message": "配置已重新加载"}
+        except Exception as e:
+            raise HTTPException(500, f"重新加载配置失败: {e}")
 
     # ── 缓存管理 ──────────────────────────────────────────────────
 
@@ -238,7 +383,7 @@ def create_api_app() -> FastAPI:
         result = geocoder.geocode(address)
         return {
             "success": result.get("success", False),
-            "address": address,
+            "original_address": address,
             "longitude": result.get("longitude"),
             "latitude": result.get("latitude"),
             "formatted_address": result.get("formatted_address"),
@@ -246,6 +391,7 @@ def create_api_app() -> FastAPI:
             "city": result.get("city"),
             "district": result.get("district"),
             "source": result.get("source"),
+            "coordinate_system": result.get("coordinate_system", "GCJ-02"),
         }
 
     @app.post("/api/geocode/batch")
@@ -277,7 +423,7 @@ def create_api_app() -> FastAPI:
 
                 if column not in df.columns:
                     with _tasks_lock:
-                        _tasks[task_id] = {"status": "error", "error": f"列 '{column}' 不存在"}
+                        _tasks[task_id] = {"status": "error", "error": f"列 '{column}' 不存在", "_completed_at": time.time()}
                     return
 
                 addresses = df[column].dropna().astype(str).tolist()
@@ -285,9 +431,9 @@ def create_api_app() -> FastAPI:
                 results = geocoder.batch_geocode(addresses, progress=False)
 
                 # 保存结果
-                df["longitude"] = [r.longitude if r else None for r in results]
-                df["latitude"] = [r.latitude if r else None for r in results]
-                df["source"] = [r.source if r else None for r in results]
+                df["longitude"] = [r.get("longitude") if r else None for r in results]
+                df["latitude"] = [r.get("latitude") if r else None for r in results]
+                df["source"] = [r.get("source") if r else None for r in results]
 
                 stem = input_path.stem
                 csv_path = OutputPaths.CSV / f"{stem}.csv"
@@ -303,13 +449,16 @@ def create_api_app() -> FastAPI:
                         "status": "done",
                         "progress": 100,
                         "total": total,
-                        "success": sum(1 for r in results if r.success),
+                        "success": sum(1 for r in results if r.get("success")),
                         "csv": str(csv_path),
                         "map": str(map_path),
+                        "_completed_at": time.time(),
                     }
+                _persist_task(task_id, _tasks[task_id])
             except Exception as e:
                 with _tasks_lock:
-                    _tasks[task_id] = {"status": "error", "error": str(e)}
+                    _tasks[task_id] = {"status": "error", "error": str(e), "_completed_at": time.time()}
+                _persist_task(task_id, _tasks[task_id])
 
         threading.Thread(target=_run_batch, daemon=True).start()
         return {"task_id": task_id, "status": "running"}
@@ -374,6 +523,9 @@ def create_api_app() -> FastAPI:
                     results.append(result)
                     if result.get("success"):
                         success_count += 1
+
+                    # 逐条推送 geocode 结果给前端
+                    yield f"data: {json.dumps({'type': 'geocode_result', 'index': i, 'data': result}, ensure_ascii=False)}\n\n"
 
                     if (i + 1) % 10 == 0 or i == total - 1:
                         yield f"data: {json.dumps({'step': 'processing', 'label': '处理地址', 'status': 'running', 'total': total, 'current': i + 1, 'success': success_count}, ensure_ascii=False)}\n\n"
@@ -460,7 +612,11 @@ def create_api_app() -> FastAPI:
 
     @app.post("/api/execute")
     async def execute_command(req: Request):
-        """执行 CLI 命令，捕获 stdout/stderr 并返回结构化结果"""
+        """执行 CLI 命令，捕获 stdout/stderr 并返回结构化结果
+
+        安全: CORS 已限定 localhost 来源，浏览器跨域请求会被拦截；
+        仅当服务器绑定到非 localhost 且攻击者为同源时才存在风险。
+        """
         body = await req.json()
         cmd = body.get("command", "").strip()
         if not cmd:
@@ -634,15 +790,40 @@ def create_api_app() -> FastAPI:
     if web_dist.exists() and (web_dist / "index.html").exists():
         app.mount("/", StaticFiles(directory=str(web_dist), html=True), name="web_gui")
 
+    _start_task_cleanup()
     return app
 
 
 # ── 服务器启动 ────────────────────────────────────────────────────
 
+
+def find_free_port() -> int:
+    """找到一个空闲的 TCP 端口"""
+    import socket
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(('127.0.0.1', 0))
+        return s.getsockname()[1]
+
+
 def run_api_server(host: str = "127.0.0.1", port: int = 8765):
-    """启动 API 服务器（阻塞）"""
+    """启动 API 服务器（阻塞）。port=0 时自动选择空闲端口"""
+    import socket
     import uvicorn
     app = create_api_app()
+
+    if port == 0:
+        port = find_free_port()
+    else:
+        # 检查指定端口是否可用，不可用则回退到随机端口
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.bind((host, port))
+        except OSError:
+            port = find_free_port()
+
+    # 写入端口信息供 TUI 发现
+    port_file = Path.home() / ".yaelocus_port.json"
+    port_file.write_text(json.dumps({"port": port, "host": host}))
     uvicorn.run(app, host=host, port=port, log_level="warning")
 
 

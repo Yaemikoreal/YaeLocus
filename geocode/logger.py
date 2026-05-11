@@ -5,6 +5,7 @@ API调用日志模块
 """
 
 import csv
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import List, Dict
@@ -19,6 +20,7 @@ class APILogger:
     def __init__(self, log_file: str = str(OutputPaths.LOG / "api调用日志.csv")):
         self.log_file = Path(log_file)
         self._logs: List[APILog] = []
+        self._lock = threading.Lock()
         self._ensure_dir()
 
     def _ensure_dir(self) -> None:
@@ -60,12 +62,16 @@ class APILogger:
             time_cost=round(time_cost, 3),
             error_message=error_message
         )
-        self._logs.append(entry)
+        with self._lock:
+            self._logs.append(entry)
 
     def save(self) -> None:
         """保存日志到CSV文件"""
-        if not self._logs:
-            return
+        with self._lock:
+            if not self._logs:
+                return
+            logs_to_save = self._logs[:]
+            self._logs = []
 
         file_exists = self.log_file.exists()
         fieldnames = [
@@ -78,11 +84,8 @@ class APILogger:
             writer = csv.DictWriter(f, fieldnames=fieldnames)
             if not file_exists:
                 writer.writeheader()
-            for log in self._logs:
+            for log in logs_to_save:
                 writer.writerow(log.to_dict())
-
-        # 清空已保存的日志，防止重复写入
-        self._logs = []
 
     def get_stats(self) -> Dict:
         """
@@ -91,30 +94,32 @@ class APILogger:
         Returns:
             统计字典: {total, success, failed, success_rate, api_usage}
         """
-        total = len(self._logs)
-        if total == 0:
+        with self._lock:
+            total = len(self._logs)
+            if total == 0:
+                return {
+                    "total": 0,
+                    "success": 0,
+                    "failed": 0,
+                    "success_rate": 0.0,
+                    "api_usage": {}
+                }
+
+            success = sum(1 for log in self._logs if log.status == "success")
+            api_counts: Dict[str, int] = {}
+
+            for log in self._logs:
+                api_counts[log.api_name] = api_counts.get(log.api_name, 0) + 1
+
             return {
-                "total": 0,
-                "success": 0,
-                "failed": 0,
-                "success_rate": 0.0,
-                "api_usage": {}
+                "total": total,
+                "success": success,
+                "failed": total - success,
+                "success_rate": round(success / total * 100, 2),
+                "api_usage": api_counts
             }
-
-        success = sum(1 for log in self._logs if log.status == "success")
-        api_counts: Dict[str, int] = {}
-
-        for log in self._logs:
-            api_counts[log.api_name] = api_counts.get(log.api_name, 0) + 1
-
-        return {
-            "total": total,
-            "success": success,
-            "failed": total - success,
-            "success_rate": round(success / total * 100, 2),
-            "api_usage": api_counts
-        }
 
     def clear(self) -> None:
         """清空内存中的日志"""
-        self._logs = []
+        with self._lock:
+            self._logs = []

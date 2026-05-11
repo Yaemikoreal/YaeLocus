@@ -1,5 +1,6 @@
-from typing import List, Dict, Optional, Tuple
+import html
 import json
+from typing import List, Dict, Optional, Tuple
 
 import folium
 from folium.plugins import MarkerCluster, HeatMap
@@ -697,6 +698,25 @@ window.addEventListener('load', function() {
 </script>
 """
 
+# 共享 JS 文件（提取自 DISTANCE_JS，外部化以减少 HTML 体积）
+_SHARED_JS_FILENAME = "distance.js"
+
+
+def _ensure_shared_js(output_dir: Path) -> Path:
+    """将测距 JS 写入输出目录，多个地图共享一份"""
+    js_path = output_dir / _SHARED_JS_FILENAME
+    # 提取 <script>...</script> 标签内的纯 JS 代码
+    raw = DISTANCE_JS.strip()
+    if raw.startswith("<script>"):
+        raw = raw[len("<script>"):]
+    if raw.endswith("</script>"):
+        raw = raw[:-len("</script>")]
+    raw = raw.strip()
+    if not js_path.exists():
+        js_path.write_text(raw, encoding="utf-8")
+    return js_path
+
+
 # 测距面板 HTML 模板 - 与地图风格统一
 DISTANCE_PANEL = """
 <div id="distance-panel" style="position: fixed; top: 10px; right: 10px; z-index: 9999;
@@ -767,7 +787,11 @@ def create_map(
     if not valid_points:
         raise ValueError("没有有效的经纬度数据")
 
-    gcj_points = [wgs84_to_gcj02(p[0], p[1]) for p in valid_points]
+    # 批量转换 WGS-84 → GCJ-02，仅一次
+    gcj_points = []
+    for lat, lon, item in valid_points:
+        gcj_lat, gcj_lon = wgs84_to_gcj02(lat, lon)
+        gcj_points.append((gcj_lat, gcj_lon, lat, lon, item))
     center_lat = sum(p[0] for p in gcj_points) / len(gcj_points)
     center_lon = sum(p[1] for p in gcj_points) / len(gcj_points)
 
@@ -801,25 +825,28 @@ def create_map(
     if use_cluster:
         marker_cluster = MarkerCluster(name="点聚类")
 
-        for lat, lon, item in valid_points:
+        for gcj_lat, gcj_lon, wgs_lat, wgs_lon, item in gcj_points:
             source = item.get("source", "unknown")
             color = source_colors.get(source, "gray")
-            address = item.get("original_address", "N/A").replace("'", "\\'")
-            gcj_lat, gcj_lon = wgs84_to_gcj02(lat, lon)
+            orig_addr = item.get("original_address", "N/A") or "N/A"
+            formatted_addr = item.get("formatted_address", "N/A") or "N/A"
+            coord_sys = item.get("coordinate_system", "N/A") or "N/A"
+            addr_js = json.dumps(orig_addr)
+            source_js = json.dumps(source)
 
             popup_html = f"""
-            <b>地址:</b> {item.get("original_address", "N/A")}<br>
-            <b>标准化地址:</b> {item.get("formatted_address", "N/A")}<br>
-            <b>经纬度:</b> {lat:.6f}, {lon:.6f}<br>
-            <b>数据来源:</b> {source}<br>
-            <b>坐标系:</b> {item.get("coordinate_system", "N/A")}
+            <b>地址:</b> {html.escape(orig_addr)}<br>
+            <b>标准化地址:</b> {html.escape(formatted_addr)}<br>
+            <b>经纬度:</b> {wgs_lat:.6f}, {wgs_lon:.6f}<br>
+            <b>数据来源:</b> {html.escape(source)}<br>
+            <b>坐标系:</b> {html.escape(coord_sys)}
             <hr style="margin: 5px 0; border-color: #eee;">
             <div style="font-size: 11px;">
-                <button onclick="setDistancePoint('start', {gcj_lat}, {gcj_lon}, '{address}', '{source}')"
+                <button onclick="setDistancePoint('start', {gcj_lat}, {gcj_lon}, {addr_js}, {source_js})"
                         class="two-point-btn" style="padding: 3px 8px; margin: 2px; background: #2ecc71; color: white; border: none; border-radius: 3px; cursor: pointer;">设为起点</button>
-                <button onclick="setDistancePoint('end', {gcj_lat}, {gcj_lon}, '{address}', '{source}')"
+                <button onclick="setDistancePoint('end', {gcj_lat}, {gcj_lon}, {addr_js}, {source_js})"
                         class="two-point-btn" style="padding: 3px 8px; margin: 2px; background: #e74c3c; color: white; border: none; border-radius: 3px; cursor: pointer;">设为终点</button>
-                <button onclick="addRecordPoint({gcj_lat}, {gcj_lon}, '{address}', '{source}')"
+                <button onclick="addRecordPoint({gcj_lat}, {gcj_lon}, {addr_js}, {source_js})"
                         class="route-btn" style="padding: 3px 8px; margin: 2px; background: #4a90d9; color: white; border: none; border-radius: 3px; cursor: pointer; display: none;">记录点</button>
             </div>
             """
@@ -833,25 +860,28 @@ def create_map(
 
         marker_cluster.add_to(feature_group_markers)
     else:
-        for lat, lon, item in valid_points:
+        for gcj_lat, gcj_lon, wgs_lat, wgs_lon, item in gcj_points:
             source = item.get("source", "unknown")
             color = source_colors.get(source, "gray")
-            address = item.get("original_address", "N/A").replace("'", "\\'")
-            gcj_lat, gcj_lon = wgs84_to_gcj02(lat, lon)
+            orig_addr = item.get("original_address", "N/A") or "N/A"
+            formatted_addr = item.get("formatted_address", "N/A") or "N/A"
+            coord_sys = item.get("coordinate_system", "N/A") or "N/A"
+            addr_js = json.dumps(orig_addr)
+            source_js = json.dumps(source)
 
             popup_html = f"""
-            <b>地址:</b> {item.get("original_address", "N/A")}<br>
-            <b>标准化地址:</b> {item.get("formatted_address", "N/A")}<br>
-            <b>经纬度:</b> {lat:.6f}, {lon:.6f}<br>
-            <b>数据来源:</b> {source}<br>
-            <b>坐标系:</b> {item.get("coordinate_system", "N/A")}
+            <b>地址:</b> {html.escape(orig_addr)}<br>
+            <b>标准化地址:</b> {html.escape(formatted_addr)}<br>
+            <b>经纬度:</b> {wgs_lat:.6f}, {wgs_lon:.6f}<br>
+            <b>数据来源:</b> {html.escape(source)}<br>
+            <b>坐标系:</b> {html.escape(coord_sys)}
             <hr style="margin: 5px 0; border-color: #eee;">
             <div style="font-size: 11px;">
-                <button onclick="setDistancePoint('start', {gcj_lat}, {gcj_lon}, '{address}', '{source}')"
+                <button onclick="setDistancePoint('start', {gcj_lat}, {gcj_lon}, {addr_js}, {source_js})"
                         class="two-point-btn" style="padding: 3px 8px; margin: 2px; background: #2ecc71; color: white; border: none; border-radius: 3px; cursor: pointer;">设为起点</button>
-                <button onclick="setDistancePoint('end', {gcj_lat}, {gcj_lon}, '{address}', '{source}')"
+                <button onclick="setDistancePoint('end', {gcj_lat}, {gcj_lon}, {addr_js}, {source_js})"
                         class="two-point-btn" style="padding: 3px 8px; margin: 2px; background: #e74c3c; color: white; border: none; border-radius: 3px; cursor: pointer;">设为终点</button>
-                <button onclick="addRecordPoint({gcj_lat}, {gcj_lon}, '{address}', '{source}')"
+                <button onclick="addRecordPoint({gcj_lat}, {gcj_lon}, {addr_js}, {source_js})"
                         class="route-btn" style="padding: 3px 8px; margin: 2px; background: #4a90d9; color: white; border: none; border-radius: 3px; cursor: pointer; display: none;">记录点</button>
             </div>
             """
@@ -865,11 +895,8 @@ def create_map(
 
     feature_group_markers.add_to(m)
 
-    if use_heatmap and len(valid_points) > 1:
-        heat_data = []
-        for lat, lon, _ in valid_points:
-            gcj_lat, gcj_lon = wgs84_to_gcj02(lat, lon)
-            heat_data.append([gcj_lat, gcj_lon])
+    if use_heatmap and len(gcj_points) > 1:
+        heat_data = [[p[0], p[1]] for p in gcj_points]
         HeatMap(
             heat_data,
             name="热力图",
@@ -920,12 +947,15 @@ def create_map(
     """
     m.get_root().html.add_child(folium.Element(legend_html))
 
-    # 注入测距功能
-    m.get_root().html.add_child(folium.Element(DISTANCE_JS))
-    m.get_root().html.add_child(folium.Element(DISTANCE_PANEL))
-
+    # 注入测距功能（JS 外部化，共享引用减体积）
     output_path = Path(output_file)
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    _ensure_shared_js(output_path.parent)
+    m.get_root().html.add_child(
+        folium.Element(f'<script src="{_SHARED_JS_FILENAME}"></script>')
+    )
+    m.get_root().html.add_child(folium.Element(DISTANCE_PANEL))
+
     m.save(str(output_path))
 
     return str(output_path.absolute())
@@ -1375,6 +1405,11 @@ def create_map_with_routes(
     if not data:
         raise ValueError("数据为空")
 
+    # 预转换 start_point 一次（后续多处使用）
+    gcj_start = None
+    if start_point:
+        gcj_start = wgs84_to_gcj02(start_point[0], start_point[1])
+
     all_lats, all_lons = [], []
     for item in data:
         lat, lon = item.get("latitude"), item.get("longitude")
@@ -1388,10 +1423,9 @@ def create_map_with_routes(
                 gcj_lat, gcj_lon = wgs84_to_gcj02(wp["lat"], wp["lon"])
                 all_lats.append(gcj_lat)
                 all_lons.append(gcj_lon)
-    if start_point:
-        gcj_slat, gcj_slon = wgs84_to_gcj02(start_point[0], start_point[1])
-        all_lats.append(gcj_slat)
-        all_lons.append(gcj_slon)
+    if gcj_start:
+        all_lats.append(gcj_start[0])
+        all_lons.append(gcj_start[1])
 
     if not all_lats:
         raise ValueError("没有可渲染的坐标点")
@@ -1452,9 +1486,8 @@ def create_map_with_routes(
         route_name = route.get("name", route_names[i % len(route_names)])
         coords = []
         waypoints = route.get("waypoints", [])
-        if start_point:
-            s_lat, s_lon = wgs84_to_gcj02(start_point[0], start_point[1])
-            coords.append([s_lat, s_lon])
+        if gcj_start:
+            coords.append([gcj_start[0], gcj_start[1]])
         for wp in waypoints:
             if wp.get("lat") and wp.get("lon"):
                 gcj_lat, gcj_lon = wgs84_to_gcj02(wp["lat"], wp["lon"])
@@ -1532,8 +1565,13 @@ def create_map_with_routes(
     )
     m.get_root().html.add_child(folium.Element(legend_html))
 
-    # 注入测距功能
-    m.get_root().html.add_child(folium.Element(DISTANCE_JS))
+    # 注入测距功能（JS 外部化）
+    output_path = Path(output_file)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    _ensure_shared_js(output_path.parent)
+    m.get_root().html.add_child(
+        folium.Element(f'<script src="{_SHARED_JS_FILENAME}"></script>')
+    )
     m.get_root().html.add_child(folium.Element(DISTANCE_PANEL))
 
     route_data_json = json.dumps(routes, ensure_ascii=False)
@@ -1578,8 +1616,6 @@ def create_map_with_routes(
     )
     m.get_root().html.add_child(folium.Element(click_handler_js))
 
-    output_path = Path(output_file)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
     m.save(str(output_path))
 
     return str(output_path.absolute())

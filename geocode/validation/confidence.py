@@ -118,6 +118,14 @@ class ConfidenceValidator:
 
         return ratio * 30
 
+    @staticmethod
+    def _strip_admin_suffix(name: str) -> str:
+        """剥离行政区划后缀，便于统一比较"""
+        for suf in ["特别行政区", "自治区", "自治县", "省", "市"]:
+            if name.endswith(suf):
+                return name[:-len(suf)]
+        return name
+
     def _score_province_match(
         self,
         hint: Optional[str],
@@ -127,9 +135,9 @@ class ConfidenceValidator:
     ) -> float:
         """省份一致性评分 - 核心检测跨省错误"""
         if hint and result_province:
-            # 检查推断省份与返回省份是否匹配
-            if hint.replace("省", "") not in result_province.replace("省", "").replace("市", ""):
-                # 跨省错误！严重问题
+            hint_clean = self._strip_admin_suffix(hint)
+            result_clean = self._strip_admin_suffix(result_province)
+            if hint_clean not in result_clean and result_clean not in hint_clean:
                 issues.append(f"跨省错误: 推断{hint}, 返回{result_province}")
                 return 0
             return 30
@@ -137,7 +145,9 @@ class ConfidenceValidator:
         # 无推断省份时，检查地址中的省份关键词
         province_in_address = self._extract_province_from_address(original)
         if province_in_address and result_province:
-            if province_in_address.replace("省", "") not in result_province.replace("省", "").replace("市", ""):
+            addr_clean = self._strip_admin_suffix(province_in_address)
+            result_clean = self._strip_admin_suffix(result_province)
+            if addr_clean not in result_clean and result_clean not in addr_clean:
                 issues.append(f"省份不一致: 地址含{province_in_address}, 返回{result_province}")
                 return 5
             return 25

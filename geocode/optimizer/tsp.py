@@ -1,16 +1,7 @@
 """TSP 求解器：贪心最近邻 + 2-opt 局部搜索"""
-import math
 from typing import Callable, List, Optional, Tuple
 
-
-def _haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    """Haversine 距离 (km)"""
-    r = 6371.0
-    dlat = math.radians(lat2 - lat1)
-    dlon = math.radians(lon2 - lon1)
-    a = (math.sin(dlat / 2) ** 2 +
-         math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon / 2) ** 2)
-    return r * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+from ..coords import haversine_km
 
 
 def _build_distance_matrix(
@@ -19,7 +10,7 @@ def _build_distance_matrix(
 ) -> List[List[float]]:
     """构建距离矩阵"""
     if dist_func is None:
-        dist_func = _haversine
+        dist_func = haversine_km
     n = len(points)
     matrix = [[0.0] * n for _ in range(n)]
     for i in range(n):
@@ -152,12 +143,11 @@ def two_opt_improve(
         improved = False
         iteration += 1
 
+        # 开放路径：不连接首尾，仅检查内部边
         for i in range(n - 2):
-            i_next = (i + 1) % n
-            for j in range(i + 2, n):
-                if i == 0 and j == n - 1:
-                    continue  # 首尾相邻，跳过
-                j_next = (j + 1) % n
+            i_next = i + 1
+            for j in range(i + 2, n - 1):
+                j_next = j + 1
 
                 # 2-opt 交换条件
                 current_cost = dist_matrix[tour[i]][tour[i_next]] + dist_matrix[tour[j]][tour[j_next]]

@@ -34,6 +34,14 @@ def _transform_lon(x: float, y: float) -> float:
     return ret
 
 
+def _validate_coord(lat: float, lon: float) -> None:
+    """验证坐标范围，防止极端值导致除零或溢出"""
+    if not (-85.0 <= lat <= 85.0):
+        raise ValueError(f"纬度 {lat} 超出安全范围 (±85°)")
+    if not (-180.0 <= lon <= 180.0):
+        raise ValueError(f"经度 {lon} 超出有效范围 (±180°)")
+
+
 def gcj02_to_wgs84(lat: float, lon: float) -> Tuple[float, float]:
     """
     GCJ-02 坐标转 WGS-84 坐标
@@ -44,7 +52,11 @@ def gcj02_to_wgs84(lat: float, lon: float) -> Tuple[float, float]:
 
     Returns:
         (wgs_lat, wgs_lon): WGS-84 坐标
+
+    Raises:
+        ValueError: 坐标超出有效范围
     """
+    _validate_coord(lat, lon)
     d_lat = _transform_lat(lon - 105.0, lat - 35.0)
     d_lon = _transform_lon(lon - 105.0, lat - 35.0)
     rad_lat = lat / 180.0 * math.pi
@@ -99,7 +111,11 @@ def wgs84_to_gcj02(lat: float, lon: float) -> Tuple[float, float]:
 
     Returns:
         (gcj_lat, gcj_lon): GCJ-02 坐标
+
+    Raises:
+        ValueError: 坐标超出有效范围
     """
+    _validate_coord(lat, lon)
     # 反向计算：WGS-84 + 偏移 = GCJ-02
     d_lat = _transform_lat(lon - 105.0, lat - 35.0)
     d_lon = _transform_lon(lon - 105.0, lat - 35.0)
@@ -124,3 +140,17 @@ def is_in_china(lat: float, lon: float) -> bool:
         是否在中国境内
     """
     return 0.8293 <= lat <= 55.8271 and 72.004 <= lon <= 137.8347
+
+
+def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Haversine 距离 (km) — 统一的球面距离计算，所有模块共用"""
+    R = 6371.0
+    dlat = math.radians(lat2 - lat1)
+    dlon = math.radians(lon2 - lon1)
+    a = (
+        math.sin(dlat / 2) ** 2
+        + math.cos(math.radians(lat1))
+        * math.cos(math.radians(lat2))
+        * math.sin(dlon / 2) ** 2
+    )
+    return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))

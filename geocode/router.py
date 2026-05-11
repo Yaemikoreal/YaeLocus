@@ -17,6 +17,7 @@ from rich.table import Table
 
 from geocode.ai import AIClient
 from geocode.config import Config, PROJECT_DIR
+from geocode.coords import haversine_km
 from geocode.map_visualizer import create_map_with_routes
 
 console = Console()
@@ -201,7 +202,7 @@ class RouteWizard:
     def _resolve_address(self, address: str) -> Optional[Tuple[float, float]]:
         """解析地址为坐标（使用内置城市表或地理编码）"""
         # 内置城市表
-        from geocode.cli import _resolve_address_coords
+        from geocode.cli.utils import _resolve_address_coords
         try:
             result = _resolve_address_coords(address)
             if result:
@@ -463,7 +464,7 @@ class RouteWizard:
             if len(coords) >= 2:
                 total_dist = 0.0
                 for i in range(len(coords) - 1):
-                    total_dist += self._haversine(
+                    total_dist += haversine_km(
                         coords[i][0], coords[i][1],
                         coords[i + 1][0], coords[i + 1][1],
                     )
@@ -537,20 +538,6 @@ class RouteWizard:
 
     # ==================== 工具方法 ====================
 
-    @staticmethod
-    def _haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-        """Haversine 距离（公里）"""
-        import math
-        R = 6371.0
-        dlat = math.radians(lat2 - lat1)
-        dlon = math.radians(lon2 - lon1)
-        a = (
-            math.sin(dlat / 2) ** 2
-            + math.cos(math.radians(lat1))
-            * math.cos(math.radians(lat2))
-            * math.sin(dlon / 2) ** 2
-        )
-        return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
 
 # ==================== 交互式 CLI 工具 ====================

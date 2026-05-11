@@ -26,7 +26,7 @@ Usage:
 
 from .cache import CacheManager
 from .config import Config
-from .coords import bd09_to_gcj02, bd09_to_wgs84, gcj02_to_wgs84, wgs84_to_gcj02
+from .coords import bd09_to_gcj02, bd09_to_wgs84, gcj02_to_wgs84, haversine_km, wgs84_to_gcj02
 from .errors import APIError, ConfigError, FileError, GeocodeError, NetworkError
 from .geocoder import Geocoder
 from .logger import APILogger
@@ -80,6 +80,7 @@ __all__ = [
     "bd09_to_wgs84",
     "bd09_to_gcj02",
     "wgs84_to_gcj02",
+    "haversine_km",
     "GeocodeError",
     "ConfigError",
     "APIError",

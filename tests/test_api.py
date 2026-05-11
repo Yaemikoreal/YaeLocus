@@ -125,7 +125,7 @@ class TestGeocodeSingle:
         if resp.status_code == 200:
             data = resp.json()
             assert "success" in data
-            assert "address" in data
+            assert "original_address" in data
 
 
 class TestGeocodeReverse:

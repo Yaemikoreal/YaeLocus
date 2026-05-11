@@ -12,6 +12,7 @@ import re
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
+from ..coords import haversine_km
 from geocode.ai import AIClient
 from geocode.ai.prompts import ROUTE_ESTIMATION_PROMPT
 from .models import RoutePoint, RouteResult, RouteSegment, TravelMode
@@ -268,13 +269,13 @@ class AIDirectionEngine:
             return False
 
         # Haverine 基线距离
-        haversine_dist = self._haversine(
+        haversine_dist = haversine_km(
             origin[0], origin[1], destination[0], destination[1]
         )
         if waypoints:
             pts = [origin] + waypoints + [destination]
             haversine_dist = sum(
-                self._haversine(pts[i][0], pts[i][1], pts[i + 1][0], pts[i + 1][1])
+                haversine_km(pts[i][0], pts[i][1], pts[i + 1][0], pts[i + 1][1])
                 for i in range(len(pts) - 1)
             )
 
@@ -389,7 +390,7 @@ class AIDirectionEngine:
         segments = []
 
         for i in range(len(pts) - 1):
-            d = self._haversine(pts[i][0], pts[i][1], pts[i + 1][0], pts[i + 1][1])
+            d = haversine_km(pts[i][0], pts[i][1], pts[i + 1][0], pts[i + 1][1])
             road_dist = d * road_factor
             duration_h = road_dist / speed if speed > 0 else 0
 
@@ -432,20 +433,6 @@ class AIDirectionEngine:
         )
 
     # ==================== 工具方法 ====================
-
-    @staticmethod
-    def _haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-        """Haversine 距离（公里）"""
-        R = 6371.0
-        dlat = math.radians(lat2 - lat1)
-        dlon = math.radians(lon2 - lon1)
-        a = (
-            math.sin(dlat / 2) ** 2
-            + math.cos(math.radians(lat1))
-            * math.cos(math.radians(lat2))
-            * math.sin(dlon / 2) ** 2
-        )
-        return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
     @staticmethod
     def _validate_coords(lat: float, lon: float, name: str = "坐标") -> None:

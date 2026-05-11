@@ -8,6 +8,7 @@
 """
 
 from pathlib import Path
+from typing import List, Optional, Tuple
 from ..config import PROJECT_DIR, OutputPaths
 
 # ── 命令树 ─────────────────────────────────────────────────────
@@ -94,7 +95,7 @@ def get_completions(text: str) -> list[str]:
     return []
 
 
-def match_command(text: str) -> tuple[str, str, list[str]] | None:
+def match_command(text: str) -> Optional[Tuple[str, str, List[str]]]:
     """匹配已注册命令
 
     Returns:
@@ -141,7 +142,7 @@ def match_command(text: str) -> tuple[str, str, list[str]] | None:
 
 # ── 内联建议（ghost text）─────────────────────────────────────────────
 
-def get_inline_suggestion(text: str) -> str | None:
+def get_inline_suggestion(text: str) -> Optional[str]:
     """返回光标后应显示的 ghost text 后缀，或 None
 
     仅对 / 命令和已注册命令组生效。

@@ -162,9 +162,11 @@ class CrossProvinceChecker:
             has_error, desc = self.check(original, province, city, district)
 
             if has_error:
-                result["cross_check_error"] = desc
-                result["success"] = False
-                errors.append(result)
+                # 不修改原始 dict，创建带错误标记的浅拷贝
+                flagged = dict(result)
+                flagged["cross_check_error"] = desc
+                flagged["success"] = False
+                errors.append(flagged)
 
                 if "跨省错误" in desc:
                     cross_province_count += 1

@@ -6,15 +6,15 @@ import CoordConvert from '../components/geocode/CoordConvert'
 import TaskHistory from '../components/geocode/TaskHistory'
 import { useQuery } from '@tanstack/react-query'
 import { fetchConfig } from '../lib/api'
-import { AlertTriangle } from 'lucide-react'
+import { AlertTriangle, ServerOff } from 'lucide-react'
 
 export default function GeocodePage() {
   const [tab, setTab] = useState<'single' | 'batch' | 'reverse' | 'convert'>('single')
 
-  const { data: config } = useQuery({
+  const { data: config, isError } = useQuery({
     queryKey: ['config'],
     queryFn: ({ signal }) => fetchConfig(signal),
-    retry: false,
+    retry: 1,
   })
 
   const hasApiKey = (config?.apis?.length ?? 0) > 0
@@ -43,7 +43,27 @@ export default function GeocodePage() {
         将地址转换为经纬度坐标，支持批量处理和多种坐标系统
       </p>
 
-      {!hasApiKey && (
+      {isError && (
+        <div
+          style={{
+            background: '#fce8e6',
+            border: '1px solid #d93025',
+            borderRadius: 8,
+            padding: '12px 16px',
+            marginBottom: 24,
+            display: 'flex',
+            alignItems: 'center',
+            gap: 8,
+            fontSize: 14,
+            color: '#d93025',
+          }}
+        >
+          <ServerOff size={16} />
+          无法连接到 API 服务器，请确认已启动 yaelocus serve
+        </div>
+      )}
+
+      {!isError && !hasApiKey && (
         <div
           style={{
             background: '#fef3c7',

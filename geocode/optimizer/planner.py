@@ -8,7 +8,8 @@
 import math
 from typing import Dict, List, Optional, Tuple
 
-from .tsp import solve_tsp, tour_distance, _build_distance_matrix, _haversine as tsp_haversine
+from .tsp import solve_tsp, tour_distance, _build_distance_matrix
+from ..coords import haversine_km
 
 from geocode.ai import AIClient
 from geocode.ai.prompts import ROUTE_DESCRIPTION_PROMPT
@@ -102,21 +103,6 @@ class RouteRecommender:
 
         return routes
 
-    def _haversine(
-        self, lat1: float, lon1: float, lat2: float, lon2: float
-    ) -> float:
-        """Haversine 距离（公里）"""
-        R = 6371.0
-        dlat = math.radians(lat2 - lat1)
-        dlon = math.radians(lon2 - lon1)
-        a = (
-            math.sin(dlat / 2) ** 2
-            + math.cos(math.radians(lat1))
-            * math.cos(math.radians(lat2))
-            * math.sin(dlon / 2) ** 2
-        )
-        return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
-
     def _make_waypoint(
         self, loc: LocationStat, order: int
     ) -> Dict:
@@ -137,7 +123,7 @@ class RouteRecommender:
             return 0.0
         total = 0.0
         for i in range(len(waypoints) - 1):
-            total += self._haversine(
+            total += haversine_km(
                 waypoints[i]["lat"], waypoints[i]["lon"],
                 waypoints[i + 1]["lat"], waypoints[i + 1]["lon"],
             )
@@ -161,7 +147,7 @@ class RouteRecommender:
         if total_locs_all > 1:
             lats = [loc.lat for loc in all_locations]
             lons = [loc.lon for loc in all_locations]
-            max_dist = self._haversine(
+            max_dist = haversine_km(
                 min(lats), min(lons), max(lats), max(lons)
             ) * total_locs_all
             efficiency = 1 - (route.total_distance_km / max_dist) if max_dist > 0 else 0.5
@@ -224,14 +210,14 @@ class RouteRecommender:
             start_lat, start_lon = self.start_point
             best_d = float("inf")
             for idx, loc in enumerate(capped):
-                d = self._haversine(start_lat, start_lon, loc.lat, loc.lon)
+                d = haversine_km(start_lat, start_lon, loc.lat, loc.lon)
                 if d < best_d:
                     best_d = d
                     start_idx = idx
 
         # 构建坐标列表和距离矩阵
         coords = [(loc.lat, loc.lon) for loc in capped]
-        dist_matrix = _build_distance_matrix(coords, dist_func=tsp_haversine)
+        dist_matrix = _build_distance_matrix(coords, dist_func=haversine_km)
 
         # 使用贪心 + 2-opt 求解 TSP
         if n >= 3:
@@ -328,7 +314,7 @@ class RouteRecommender:
             c_lat, c_lon = current_lat, current_lon
 
             def combined_score(loc: LocationStat, _lat=c_lat, _lon=c_lon) -> float:
-                dist = self._haversine(_lat, _lon, loc.lat, loc.lon)
+                dist = haversine_km(_lat, _lon, loc.lat, loc.lon)
                 # 距离归一化（最大 100km，超过视为 1）
                 dist_weight = min(dist / 100.0, 1.0)
                 # 频次密度归一化

@@ -1,6 +1,7 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { fetchConfig, saveConfig, testAPIKeys } from '../../lib/api'
+import type { ConfigTestResponse } from '../../lib/types'
 import { Loader2, Check, X, Save, FlaskConical } from 'lucide-react'
 import { toast } from 'sonner'
 
@@ -19,21 +20,31 @@ export default function APIKeyForm() {
   const [aiProvider, setAiProvider] = useState('deepseek')
   const [deepseekKey, setDeepseekKey] = useState('')
   const [initialized, setInitialized] = useState(false)
-  const [testResults, setTestResults] = useState<Record<string, boolean | null>>({})
+  const [testResults, setTestResults] = useState<ConfigTestResponse>({})
 
-  // Init from loaded config
-  if (config && !initialized) {
-    setAmapKey(config.apis?.includes('amap') ? '••••••••' : '')
-    setBaiduAk(config.apis?.includes('baidu') ? '••••••••' : '')
-    setTiandituTk(config.apis?.includes('tianditu') ? '••••••••' : '')
-    setAiEnabled(config.ai_enabled ? 'true' : 'false')
-    setAiProvider(config.ai_provider || 'deepseek')
-    setInitialized(true)
-  }
+  // Track which API keys are already configured (for placeholder display)
+  const hasAmapKey = config?.apis?.includes('amap') ?? false
+
+  useEffect(() => {
+    if (config && !initialized) {
+      setAiEnabled(config.ai_enabled ? 'true' : 'false')
+      setAiProvider(config.ai_provider || 'deepseek')
+      setInitialized(true)
+    }
+  }, [config, initialized])
 
   const saveMutation = useMutation({
-    mutationFn: () =>
-      saveConfig({ amap_key: amapKey, baidu_ak: baiduAk, tianditu_tk: tiandituTk, ai_enabled: aiEnabled, ai_provider: aiProvider, deepseek_key: deepseekKey }),
+    mutationFn: () => {
+      // Only send non-empty values to avoid overwriting stored keys
+      return saveConfig({
+        amap_key: amapKey,
+        baidu_ak: baiduAk,
+        tianditu_tk: tiandituTk,
+        ai_enabled: aiEnabled,
+        ai_provider: aiProvider,
+        deepseek_key: deepseekKey,
+      })
+    },
     onSuccess: (data) => {
       toast.success(data.message || '配置已保存')
       queryClient.invalidateQueries({ queryKey: ['config'] })
@@ -48,12 +59,12 @@ export default function APIKeyForm() {
     onError: () => toast.error('测试失败'),
   })
 
-  const handleTest = (provider: string) => {
+  const handleTest = (provider: keyof ConfigTestResponse) => {
     setTestResults((prev) => ({ ...prev, [provider]: null }))
     testMutation.mutate()
   }
 
-  const statusBadge = (key: string) => {
+  const statusBadge = (key: keyof ConfigTestResponse) => {
     if (testResults[key] === undefined) return null
     if (testResults[key] === null) return <span style={{ fontSize: 12, color: '#6b6b6b' }}>测试中...</span>
     if (testResults[key]) return <span style={{ fontSize: 12, color: '#1e8e3e', display: 'inline-flex', alignItems: 'center', gap: 4 }}><Check size={14} /> 有效</span>
@@ -82,7 +93,7 @@ export default function APIKeyForm() {
           <span style={{ display: 'inline-block', padding: '2px 6px', borderRadius: 4, fontSize: 11, background: '#e6f4ea', color: '#1e8e3e' }}>推荐</span>
         </label>
         <div style={{ display: 'flex', gap: 8 }}>
-          <input type="password" value={amapKey} onChange={(e) => setAmapKey(e.target.value)} placeholder="32位 Key" style={inputStyle} />
+          <input type="password" value={amapKey} onChange={(e) => setAmapKey(e.target.value)} placeholder={hasAmapKey ? '已配置，留空则不修改' : '32位 Key'} style={inputStyle} />
           <button onClick={() => handleTest('amap')} style={{ padding: '8px 16px', background: '#e8eaed', border: 'none', borderRadius: 8, fontSize: 13, cursor: 'pointer', whiteSpace: 'nowrap', display: 'flex', alignItems: 'center', gap: 4 }}>
             <FlaskConical size={14} /> 测试
           </button>

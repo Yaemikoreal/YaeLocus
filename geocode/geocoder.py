@@ -7,6 +7,7 @@
 import os
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Optional
 
 import requests
@@ -17,6 +18,8 @@ from .config import Config
 from .coords import gcj02_to_wgs84, bd09_to_wgs84
 from .logger import APILogger
 from .models import GeocodeResult
+from .preprocessing import InvalidAddressFilter, AddressNormalizer
+from .validation import ConfidenceValidator
 
 
 class Geocoder:
@@ -25,6 +28,13 @@ class Geocoder:
 
     支持多API轮换、智能缓存、限流控制、HTTP连接复用、重试机制
     """
+
+    # 各 API 的每秒最大并发请求数（尊重免费配额）
+    _API_RATE_LIMITS = {
+        "amap": 5,       # 高德: 5 QPS
+        "tianditu": 10,  # 天地图: 10 QPS
+        "baidu": 5,      # 百度: 5 QPS
+    }
 
     def __init__(
         self,
@@ -43,10 +53,24 @@ class Geocoder:
         self.cache = cache_manager if cache_manager is not None else CacheManager()
         self.logger = api_logger if api_logger is not None else APILogger()
         self._cache_ttl = cache_ttl
-        self._last_request_time = 0.0
         self._request_count = 0
         self._success_count = 0
         self._counter_lock = threading.Lock()
+
+        # 各 API 独立限流状态
+        self._api_last_request: Dict[str, float] = {}
+        self._api_locks: Dict[str, threading.Lock] = {}
+
+        # 预处理和验证组件 — 单例化避免重复 I/O
+        self.normalizer = AddressNormalizer()
+        self.filter_obj = InvalidAddressFilter()
+        self.validator = ConfidenceValidator()
+
+        # 各 API 限流信号量
+        self._api_semaphores = {
+            name: threading.BoundedSemaphore(limit)
+            for name, limit in self._API_RATE_LIMITS.items()
+        }
 
         # HTTP Session 复用（性能优化）
         self._session = requests.Session()
@@ -58,17 +82,26 @@ class Geocoder:
         self._session.mount('http://', adapter)
         self._session.mount('https://', adapter)
 
-    def _rate_limit(self) -> None:
-        """请求限流"""
-        elapsed = time.time() - self._last_request_time
-        if elapsed < Config.REQUEST_DELAY:
-            time.sleep(Config.REQUEST_DELAY - elapsed)
-        self._last_request_time = time.time()
+    def _rate_limit(self, api_name: str = "amap") -> None:
+        """各 API 独立请求限流"""
+        if api_name not in self._api_locks:
+            self._api_locks[api_name] = threading.Lock()
+        lock = self._api_locks[api_name]
+
+        min_interval = 1.0 / self._API_RATE_LIMITS.get(api_name, 5)
+
+        with lock:
+            if api_name in self._api_last_request:
+                elapsed = time.time() - self._api_last_request[api_name]
+                if elapsed < min_interval:
+                    time.sleep(min_interval - elapsed)
+            self._api_last_request[api_name] = time.time()
 
     def _api_call_with_retry(
         self,
         url: str,
         params: dict,
+        api_name: str = "amap",
         max_retries: int = 3
     ) -> Optional[requests.Response]:
         """
@@ -79,24 +112,23 @@ class Geocoder:
         Args:
             url: API 端点 URL
             params: 请求参数
+            api_name: API 名称，用于限流
             max_retries: 最大重试次数
 
         Returns:
             Response 对象或 None
         """
-        retry_delay = 1.0  # 初始重试延迟
+        retry_delay = 1.0
 
         for attempt in range(max_retries):
             try:
-                self._rate_limit()
+                self._rate_limit(api_name)
                 response = self._session.get(url, params=params, timeout=Config.REQUEST_TIMEOUT)
                 return response
-            except (requests.Timeout, requests.ConnectionError) as e:
+            except (requests.Timeout, requests.ConnectionError):
                 if attempt < max_retries - 1:
-                    # 指数退避
                     time.sleep(retry_delay * (2 ** attempt))
                 else:
-                    # 最后一次失败，抛出异常让调用方处理
                     raise
         return None
 
@@ -138,7 +170,7 @@ class Geocoder:
 
         try:
             params = {"key": Config.AMAP_KEY, "address": address, "output": "json"}
-            response = self._api_call_with_retry(Config.AMAP_URL, params)
+            response = self._api_call_with_retry(Config.AMAP_URL, params, api_name="amap")
             data = response.json()
             time_cost = time.time() - start_time
 
@@ -186,7 +218,7 @@ class Geocoder:
 
         try:
             params = {"ds": f'{{"keyWord":"{address}"}}', "tk": Config.TIANDITU_TK}
-            response = self._api_call_with_retry(Config.TIANDITU_URL, params)
+            response = self._api_call_with_retry(Config.TIANDITU_URL, params, api_name="tianditu")
             data = response.json()
             time_cost = time.time() - start_time
 
@@ -231,7 +263,7 @@ class Geocoder:
 
         try:
             params = {"address": address, "output": "json", "ak": Config.BAIDU_AK}
-            response = self._api_call_with_retry(Config.BAIDU_URL, params)
+            response = self._api_call_with_retry(Config.BAIDU_URL, params, api_name="baidu")
             data = response.json()
             time_cost = time.time() - start_time
 
@@ -280,12 +312,8 @@ class Geocoder:
             地理编码结果字典（含 confidence 字段）
         """
         # === 预处理阶段 ===
-        from .preprocessing import InvalidAddressFilter, AddressNormalizer
-        from .validation import ConfidenceValidator
-
         # 1. 无效数据检查
-        filter_obj = InvalidAddressFilter()
-        is_valid, reason = filter_obj.is_valid(address)
+        is_valid, reason = self.filter_obj.is_valid(address)
         if not is_valid:
             return {
                 "success": False,
@@ -295,8 +323,7 @@ class Geocoder:
             }
 
         # 2. 地址标准化和省份推断
-        normalizer = AddressNormalizer()
-        normalized, meta = normalizer.normalize(str(address))
+        normalized, meta = self.normalizer.normalize(str(address))
         province_hint = meta.get("province_hint")
 
         if not normalized or not normalized.strip():
@@ -325,8 +352,7 @@ class Geocoder:
                     result_dict = result.to_dict()
 
                     # === 结果验证阶段 ===
-                    validator = ConfidenceValidator()
-                    confidence = validator.validate(
+                    confidence = self.validator.validate(
                         str(address),  # 原始地址
                         result_dict,
                         province_hint
@@ -357,37 +383,81 @@ class Geocoder:
             "confidence": {"total": 0, "issues": ["All APIs failed"], "is_trustworthy": False}
         }
 
-    def batch_geocode(self, addresses: List[str], progress: bool = True) -> List[Dict]:
+    def batch_geocode(
+        self, addresses: List[str], progress: bool = True, workers: int = 3
+    ) -> List[Dict]:
         """
-        批量地理编码
+        批量地理编码（并行处理）
 
         Args:
             addresses: 地址列表
             progress: 是否显示进度条
+            workers: 并行线程数，默认 3
 
         Returns:
-            结果列表
+            结果列表（保持原始顺序）
         """
-        results = []
-        iterator = addresses
+        if not addresses:
+            return []
 
-        if progress and not os.environ.get('YAELOCUS_TUI'):
-            try:
-                from tqdm import tqdm
-                iterator = tqdm(addresses, desc="地理编码中", unit="条")
-            except ImportError:
-                pass
+        total = len(addresses)
 
-        for address in iterator:
-            result = self.geocode(address)
-            results.append(result)
+        # 少于 3 条不启用并行
+        if workers < 2 or total < 3:
+            results = []
+            iterator = addresses
+            if progress and not os.environ.get('YAELOCUS_TUI'):
+                try:
+                    from tqdm import tqdm
+                    iterator = tqdm(addresses, desc="地理编码中", unit="条")
+                except ImportError:
+                    pass
+            for address in iterator:
+                results.append(self.geocode(address))
+            self.cache.flush()
+            self.logger.save()
+            return results
 
-        # 批量完成后flush缓存
+        results: List[Optional[Dict]] = [None] * total
+
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = {
+                executor.submit(self.geocode, addr): idx
+                for idx, addr in enumerate(addresses)
+            }
+
+            completed = 0
+            if progress and not os.environ.get('YAELOCUS_TUI'):
+                try:
+                    from tqdm import tqdm
+                    pbar = tqdm(total=total, desc="地理编码中", unit="条")
+                except ImportError:
+                    pbar = None
+            else:
+                pbar = None
+
+            for future in as_completed(futures):
+                idx = futures[future]
+                try:
+                    results[idx] = future.result()
+                except Exception as e:
+                    results[idx] = {
+                        "success": False,
+                        "original_address": addresses[idx],
+                        "error": str(e),
+                        "confidence": {"total": 0, "issues": [str(e)], "is_trustworthy": False}
+                    }
+                completed += 1
+                if pbar:
+                    pbar.update(1)
+
+            if pbar:
+                pbar.close()
+
         self.cache.flush()
-        # 保存日志
         self.logger.save()
 
-        return results
+        return [r for r in results if r is not None]
 
     def get_cache_stats(self) -> Dict:
         """获取缓存统计信息"""

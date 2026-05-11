@@ -9,6 +9,7 @@ export default function ChatPanel() {
   const [streaming, setStreaming] = useState(false)
   const [error, setError] = useState('')
   const streamContent = useRef('')
+  const lastRenderRef = useRef(0)
   const abortRef = useRef<AbortController | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
 
@@ -32,10 +33,17 @@ export default function ChatPanel() {
       messages,
       (token) => {
         streamContent.current += token
-        setMessages([...updatedMessages, { role: 'assistant', content: streamContent.current }])
-        scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' })
+        // Throttle re-renders to ~20fps，避免每个 token 都全量 re-render
+        const now = Date.now()
+        if (now - lastRenderRef.current >= 50) {
+          lastRenderRef.current = now
+          setMessages([...updatedMessages, { role: 'assistant', content: streamContent.current }])
+          scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' })
+        }
       },
       () => {
+        // 最终渲染确保所有 token 显示
+        setMessages([...updatedMessages, { role: 'assistant', content: streamContent.current }])
         setStreaming(false)
       },
       (err) => {

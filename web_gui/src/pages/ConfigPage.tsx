@@ -3,14 +3,15 @@ import { useQuery } from '@tanstack/react-query'
 import { fetchConfig } from '../lib/api'
 import APIKeyForm from '../components/config/APIKeyForm'
 import CachePanel from '../components/config/CachePanel'
-import { Settings, Database, Activity, Key } from 'lucide-react'
+import { Settings, Database, Activity, Key, ServerOff } from 'lucide-react'
 
 export default function ConfigPage() {
   const [tab, setTab] = useState<'keys' | 'cache'>('keys')
 
-  const { data: config } = useQuery({
+  const { data: config, isLoading, isError } = useQuery({
     queryKey: ['config'],
     queryFn: ({ signal }) => fetchConfig(signal),
+    retry: 1,
   })
 
   return (
@@ -21,6 +22,22 @@ export default function ConfigPage() {
       <p style={{ color: 'rgba(20,20,19,0.65)', fontSize: 16, marginBottom: 32 }}>
         管理 API 密钥、AI 设置和缓存数据
       </p>
+
+      {isLoading && (
+        <div style={{ padding: 48, textAlign: 'center', color: '#888' }}>正在连接 API 服务器...</div>
+      )}
+
+      {isError && (
+        <div style={{
+          background: '#fce8e6', borderRadius: 8, padding: '16px 20px',
+          marginBottom: 24, display: 'flex', alignItems: 'center', gap: 12,
+        }}>
+          <ServerOff size={20} style={{ color: '#d93025' }} />
+          <span style={{ fontSize: 14, color: '#d93025' }}>
+            无法连接到 API 服务器，请确认已执行 yaelocus serve 并检查端口
+          </span>
+        </div>
+      )}
 
       {/* Status overview */}
       {config && (

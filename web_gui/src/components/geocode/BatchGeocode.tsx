@@ -26,6 +26,7 @@ export default function BatchGeocode({ disabled }: Props) {
   const [results, setResults] = useState<GeocodeResultType[]>([])
   const [fileError, setFileError] = useState('')
   const abortRef = useRef<AbortController | null>(null)
+  const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const startTimeRef = useRef(0)
   const dropRef = useRef<HTMLDivElement>(null)
 
@@ -55,6 +56,14 @@ export default function BatchGeocode({ disabled }: Props) {
     const controller = new AbortController()
     abortRef.current = controller
 
+    // 10 分钟超时保护，防止 SSE 流挂起
+    if (timeoutRef.current) clearTimeout(timeoutRef.current)
+    timeoutRef.current = setTimeout(() => {
+      controller.abort()
+      setStatus('error')
+      setError('编码超时（10分钟），请重试或减少地址数量')
+    }, 600_000)
+
     batchGeocodeStream(
       file,
       column,
@@ -67,11 +76,17 @@ export default function BatchGeocode({ disabled }: Props) {
           success: evt.success,
         })
       },
+      (res) => {
+        setStatus('running')
+        setResults((prev) => [...prev, res])
+      },
       (_taskId, res) => {
+        if (timeoutRef.current) { clearTimeout(timeoutRef.current); timeoutRef.current = null }
         setStatus('done')
         setResults(res || [])
       },
       (err) => {
+        if (timeoutRef.current) { clearTimeout(timeoutRef.current); timeoutRef.current = null }
         setStatus('error')
         setError(err)
       },
@@ -81,6 +96,7 @@ export default function BatchGeocode({ disabled }: Props) {
 
   const handleCancel = () => {
     abortRef.current?.abort()
+    if (timeoutRef.current) clearTimeout(timeoutRef.current)
     setStatus('idle')
   }
 

@@ -1,6 +1,6 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { fetchCacheStats, clearCache, cleanupCache, exportCache } from '../../lib/api'
-import { Database, Trash2, RefreshCw, Download, Loader2 } from 'lucide-react'
+import { Trash2, RefreshCw, Download, Loader2 } from 'lucide-react'
 import { toast } from 'sonner'
 
 export default function CachePanel() {

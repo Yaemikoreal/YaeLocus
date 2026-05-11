@@ -3,9 +3,18 @@
 """
 
 import math
+import numpy as np
 from typing import Dict, List, Tuple
 
+from ..coords import haversine_km
 from .models import LocationCluster, LocationStat
+
+# 优先使用 sklearn BallTree 空间索引，大幅降低 O(n²) → O(n log n)
+try:
+    from sklearn.neighbors import BallTree
+    _HAS_BALLTREE = True
+except ImportError:
+    _HAS_BALLTREE = False
 
 
 class LocationAnalyzer:
@@ -22,6 +31,18 @@ class LocationAnalyzer:
         """
         self.cluster_radius_km = cluster_radius_km
         self.min_samples = min_samples
+
+    @staticmethod
+    def _build_spatial_index(
+        locations: List[LocationStat],
+    ) -> Tuple[object, np.ndarray]:
+        """构建空间索引。BallTree 优先，回退到暴力搜索标记"""
+        coords_rad = np.deg2rad([(loc.lat, loc.lon) for loc in locations])
+        if _HAS_BALLTREE:
+            tree = BallTree(coords_rad, metric='haversine')
+        else:
+            tree = None
+        return tree, coords_rad
 
     def load_from_csv(
         self,
@@ -177,105 +198,103 @@ class LocationAnalyzer:
         clusters, noise = self._cluster_locations(locations, min_samples=self.min_samples)
         return locations, clusters, noise
 
-    def _haversine(self, lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-        """Haversine 公式计算两点间距离（公里）"""
-        R = 6371.0
-        dlat = math.radians(lat2 - lat1)
-        dlon = math.radians(lon2 - lon1)
-        a = (
-            math.sin(dlat / 2) ** 2
-            + math.cos(math.radians(lat1))
-            * math.cos(math.radians(lat2))
-            * math.sin(dlon / 2) ** 2
-        )
-        return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
-
     def _calculate_density_scores(self, locations: List[LocationStat]) -> None:
         """计算每个位置的密度评分
 
         密度评分 = frequency × 0.6 + nearby_count × 0.4
         nearby_count 为半径 cluster_radius_km 内的其他位置数量
         """
-        for loc in locations:
-            nearby = 0
-            for other in locations:
-                if other is loc:
-                    continue
-                dist = self._haversine(loc.lat, loc.lon, other.lat, other.lon)
-                if dist <= self.cluster_radius_km:
-                    nearby += 1
-            loc.density_score = loc.frequency * 0.6 + nearby * 0.4
+        n = len(locations)
+        if n == 0:
+            return
+
+        eps_rad = self.cluster_radius_km / 6371.0
+        tree, coords_rad = self._build_spatial_index(locations)
+
+        if tree is not None:
+            indices = tree.query_radius(coords_rad, r=eps_rad)
+            for i, loc in enumerate(locations):
+                nearby = max(0, len(indices[i]) - 1)  # 排除自身
+                loc.density_score = loc.frequency * 0.6 + nearby * 0.4
+        else:
+            for i, loc in enumerate(locations):
+                nearby = 0
+                for j, other in enumerate(locations):
+                    if i == j:
+                        continue
+                    if haversine_km(loc.lat, loc.lon, other.lat, other.lon) <= self.cluster_radius_km:
+                        nearby += 1
+                loc.density_score = loc.frequency * 0.6 + nearby * 0.4
 
     def _cluster_locations(
         self, locations: List[LocationStat], min_samples: int = 2
     ) -> Tuple[List[LocationCluster], List[LocationStat]]:
         """DBSCAN 密度聚类
 
-        标准 DBSCAN 算法：
-        - 核心点：eps 半径内至少有 min_samples 个邻居（含自身）
-        - 边界点：在核心点邻域内但邻居数不足 min_samples
-        - 噪声点：既非核心点也非边界点
-
-        Args:
-            locations: 待聚类的位置列表
-            min_samples: 成为核心点的最小邻居数
-
-        Returns:
-            (clusters, noise): 聚类列表和噪声点列表
+        使用 BallTree 空间索引 O(n log n)，回退到暴力搜索 O(n²)。
         """
         n = len(locations)
         if n == 0:
             return [], []
 
-        eps = self.cluster_radius_km
+        eps_rad = self.cluster_radius_km / 6371.0
+        tree, coords_rad = self._build_spatial_index(locations)
 
-        # 预计算邻域
-        neighbors = {}
-        for i, loc in enumerate(locations):
-            nbrs = []
-            for j, other in enumerate(locations):
-                if i == j:
-                    continue
-                if self._haversine(loc.lat, loc.lon, other.lat, other.lon) <= eps:
-                    nbrs.append(j)
-            neighbors[i] = nbrs
+        if tree is not None:
+            indices = tree.query_radius(coords_rad, r=eps_rad)
+            # BallTree 返回的 neighbors 包含自身；转为 list[list[int]]
+            neighbors = [list(neigh) for neigh in indices]
+        else:
+            neighbors = {}
+            for i, loc in enumerate(locations):
+                nbrs = []
+                for j, other in enumerate(locations):
+                    if i == j:
+                        continue
+                    if haversine_km(loc.lat, loc.lon, other.lat, other.lon) <= self.cluster_radius_km:
+                        nbrs.append(j)
+                neighbors[i] = nbrs
 
-        # 识别核心点
-        is_core = [len(neighbors[i]) >= min_samples for i in range(n)]
+        # 识别核心点 (含自身的邻居数 >= min_samples)
+        is_core = [len(neighbors[i]) >= min_samples if isinstance(neighbors, list) else len(neighbors.get(i, [])) >= min_samples for i in range(n)]
+        if not isinstance(neighbors, list):
+            neighbors_list = neighbors
 
         # DBSCAN 聚类
         visited = [False] * n
-        labels = [-1] * n  # -1 = 噪声
+        labels = [-1] * n
         cluster_id = -1
+        seen = set()
 
         for i in range(n):
             if visited[i]:
                 continue
             visited[i] = True
-
             if not is_core[i]:
-                continue  # 非核心点暂不处理
+                continue
 
             cluster_id += 1
             labels[i] = cluster_id
 
-            # BFS 扩展聚类
-            queue = list(neighbors[i])
+            nbrs = neighbors[i] if isinstance(neighbors, list) else neighbors_list.get(i, [])
+            queue = list(nbrs)
+            seen.clear()
+            seen.update(nbrs)
+
             for q in queue:
                 if visited[q]:
                     continue
                 visited[q] = True
                 if is_core[q]:
-                    # 核心点：将其邻居也加入队列
-                    for nbr in neighbors[q]:
-                        if nbr not in queue and nbr != i:
+                    q_nbrs = neighbors[q] if isinstance(neighbors, list) else neighbors_list.get(q, [])
+                    for nbr in q_nbrs:
+                        if nbr not in seen and nbr != i:
+                            seen.add(nbr)
                             queue.append(nbr)
-                # 边界点或核心点都归入本聚类
                 labels[q] = cluster_id
 
         # 组装结果
         clusters = []
-        noise = []
         for cid in range(cluster_id + 1):
             cluster_locs = [locations[i] for i in range(n) if labels[i] == cid]
             if not cluster_locs:
@@ -287,7 +306,7 @@ class LocationAnalyzer:
             center_lon = sum(loc.lon for loc in cluster_locs) / len(cluster_locs)
             total_freq = sum(loc.frequency for loc in cluster_locs)
             max_dist = max(
-                self._haversine(center_lat, center_lon, loc.lat, loc.lon)
+                haversine_km(center_lat, center_lon, loc.lat, loc.lon)
                 for loc in cluster_locs
             )
 
@@ -302,8 +321,6 @@ class LocationAnalyzer:
             )
             clusters.append(cluster)
 
-        # 收集噪声点
         noise = [locations[i] for i in range(n) if labels[i] == -1]
-
         clusters.sort(key=lambda c: c.score, reverse=True)
         return clusters, noise
