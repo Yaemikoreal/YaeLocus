@@ -9,7 +9,7 @@ import sys
 import typer
 
 from .. import __version__
-from .groups import ai_group, config_group, geocode_group, map_group
+from .groups import ai_group, config_group, geocode_group, map_group, tui_group
 from .utils import console, print_version, setup_windows_encoding
 
 # Windows 编码兼容
@@ -23,13 +23,39 @@ def _version_callback(value: bool):
         raise typer.Exit()
 
 
+def _show_welcome():
+    """显示欢迎界面：logo + 版本 + 常用命令"""
+    from rich.table import Table
+
+    # Logo - 简洁文本样式
+    console.print()
+    console.print("[bold cyan]YaeLocus[/bold cyan] [dim]v{}[/dim]".format(__version__))
+    console.print("[dim]地址转经纬度 · AI 分析[/dim]")
+    console.print()
+
+    # 常用命令表格
+    table = Table(show_header=False, box=None, padding=(0, 2))
+    table.add_column("命令", style="yellow")
+    table.add_column("说明")
+    table.add_row("yaelocus tui", "启动交互式终端界面")
+    table.add_row("yaelocus gui", "启动新版 Web 图形界面")
+    table.add_row("yaelocus geocode single <地址>", "单地址地理编码")
+    table.add_row("yaelocus geocode batch -i <文件>", "批量地理编码")
+    table.add_row("yaelocus config setup", "配置 API 密钥")
+    table.add_row("yaelocus --help", "查看完整帮助")
+
+    console.print(table)
+    console.print()
+    console.print("[dim]运行 'yaelocus tui' 进入交互模式，或使用上述命令直接操作[/dim]")
+
+
 def _create_app() -> typer.Typer:
     """创建并配置 Typer 应用"""
     app = typer.Typer(
         name="yaelocus",
         help="地址转经纬度 | 路线规划 | AI 分析 | 行程优化",
         add_completion=False,
-        no_args_is_help=False,  # 无参数时交给回调处理（进入 TUI）
+        no_args_is_help=False,  # 无参数时交给回调处理（显示欢迎界面）
     )
 
     # 全局回调
@@ -43,19 +69,17 @@ def _create_app() -> typer.Typer:
             help="显示版本信息",
         ),
     ):
-        """YaeLocus - 地址转经纬度 + 路线规划 + AI 分析
-
-        无子命令时启动交互式终端界面。
-        """
+        """YaeLocus - 地址转经纬度 + 路线规划 + AI 分析"""
         if ctx.invoked_subcommand is None:
-            # 无子命令 → 进入交互式 TUI
-            _launch_repl()
+            # 无子命令 → 显示欢迎界面
+            _show_welcome()
 
     # 注册分组
     app.add_typer(geocode_group)
     app.add_typer(map_group)
     app.add_typer(ai_group)
     app.add_typer(config_group)
+    app.add_typer(tui_group)
 
     # 注册独立命令 (serve)
     from .commands.serve import register_serve

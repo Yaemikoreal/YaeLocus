@@ -11,7 +11,7 @@ CLI 命令分组定义
 import typer
 
 from .commands.geocode import single, batch, reverse_cmd, convert_cmd
-from .commands.config import setup, check, test_api
+from .commands.config import setup, check, test_api, status
 from .commands.cache import cache_cmd
 from .commands.map import list_files_cmd, create
 from .commands.ai_ import chat, analyze, route
@@ -52,3 +52,18 @@ config_group.command(name="setup")(setup)
 config_group.command(name="check")(check)
 config_group.command(name="test-api")(test_api)
 config_group.command(name="cache")(cache_cmd)
+config_group.command(name="status")(status)
+
+# TUI 命令组
+tui_group = typer.Typer(
+    name="tui",
+    help="启动终端交互界面",
+    no_args_is_help=True,
+)
+
+
+@tui_group.callback(invoke_without_command=True)
+def tui_main(ctx: typer.Context):
+    """启动交互式终端界面 (Ink TUI 或 Rich 回退)"""
+    from .app import _launch_repl
+    _launch_repl()

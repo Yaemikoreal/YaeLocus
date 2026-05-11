@@ -51,12 +51,22 @@ def _create_app() -> FastAPI:
     async def geocode_file(
         file: UploadFile = File(...),
         column: str = Form("地址"),
-        workers: int = Form(1),
+        workers: str = Form("1"),
         use_cache: bool = Form(True),
+        province: str = Form(""),
+        city: str = Form(""),
     ):
         """上传文件并开始地理编码"""
         if not Config.validate():
             return JSONResponse({"error": "请先配置 API 密钥"}, status_code=400)
+
+        # 处理 workers 参数（支持 auto）
+        if workers == "auto":
+            # 根据已配置的 API 数量自动选择线程数
+            apis = Config.get_available_apis()
+            num_workers = min(len(apis) * 2 + 1, 5) if apis else 1
+        else:
+            num_workers = int(workers)
 
         task_id = uuid.uuid4().hex[:12]
         content = await file.read()
@@ -80,13 +90,32 @@ def _create_app() -> FastAPI:
         if len(addresses) == 0:
             return JSONResponse({"error": "未找到有效地址"}, status_code=400)
 
-        with _tasks_lock:
-            _tasks[task_id] = {"status": "running", "progress": 0, "total": len(addresses), "results": [], "error": None}
+        # 如果指定了省市，添加前缀
+        location_prefix = ""
+        if province and city:
+            location_prefix = f"{province}{city}"
+        elif province:
+            location_prefix = province
 
-        thread = threading.Thread(target=_run_geocode, args=(task_id, addresses, column, int(workers), bool(use_cache)), daemon=True)
+        with _tasks_lock:
+            _tasks[task_id] = {
+                "status": "running",
+                "progress": 0,
+                "total": len(addresses),
+                "results": [],
+                "error": None,
+                "filename": file.filename or "uploaded",
+                "location_prefix": location_prefix,
+            }
+
+        thread = threading.Thread(
+            target=_run_geocode,
+            args=(task_id, addresses, column, num_workers, bool(use_cache), location_prefix),
+            daemon=True
+        )
         thread.start()
 
-        return JSONResponse({"task_id": task_id, "total": len(addresses)})
+        return JSONResponse({"task_id": task_id, "total": len(addresses), "workers": num_workers})
 
     @app.post("/api/geocode/single")
     async def geocode_single(address: str = Form(...)):
@@ -127,7 +156,7 @@ def _create_app() -> FastAPI:
             return JSONResponse({"error": "任务不存在"}, status_code=404)
         if task["status"] == "running":
             return JSONResponse({"error": "任务尚未完成"}, status_code=400)
-        # 返回精简结果（仅成功项的前200条）
+        # 返回全部结果
         results = task["results"]
         success_results = [r for r in results if r.get("success")]
         return JSONResponse({
@@ -136,7 +165,7 @@ def _create_app() -> FastAPI:
             "total": task["total"],
             "success": len(success_results),
             "failed": len(results) - len(success_results),
-            "results": success_results[:200],
+            "results": success_results,
         })
 
     @app.get("/api/map/{task_id}")
@@ -160,6 +189,19 @@ def _create_app() -> FastAPI:
                 return HTMLResponse(f.read())
         except Exception as e:
             return JSONResponse({"error": f"地图生成失败: {str(e)}"}, status_code=500)
+
+    @app.get("/api/map/view/{filename}")
+    async def view_map_file(filename: str):
+        """在新标签页打开地图 HTML 文件"""
+        from ..config import OutputPaths
+        map_dir = OutputPaths.MAP
+        safe_name = Path(filename).name
+        file_path = map_dir / safe_name
+        if not file_path.exists():
+            return JSONResponse({"error": "文件不存在"}, status_code=404)
+        if file_path.suffix.lower() != ".html":
+            return JSONResponse({"error": "仅支持 HTML 文件"}, status_code=400)
+        return FileResponse(str(file_path), media_type="text/html")
 
     @app.post("/api/config/test")
     async def test_api_key(
@@ -266,10 +308,27 @@ def _create_app() -> FastAPI:
             "cache_total": cache_stats["total_entries"],
         })
 
+    @app.get("/api/maps")
+    async def list_maps():
+        """列出 output/map 目录下的地图文件"""
+        from ..config import OutputPaths
+        map_dir = OutputPaths.MAP
+        if not map_dir.exists():
+            return JSONResponse([])
+        files = []
+        for f in sorted(map_dir.glob("*.html"), key=lambda x: x.stat().st_mtime, reverse=True):
+            files.append({
+                "name": f.name,
+                "path": str(f),
+                "size": f.stat().st_size,
+                "mtime": f.stat().st_mtime,
+            })
+        return JSONResponse(files)
+
     return app
 
 
-def _run_geocode(task_id: str, addresses: list, column: str, workers: int, use_cache: bool):
+def _run_geocode(task_id: str, addresses: list, column: str, workers: int, use_cache: bool, location_prefix: str = ""):
     """后台执行地理编码任务"""
     try:
         cache = CacheManager(str(_OUTPUT_DIR / "geocache.db"))
@@ -281,25 +340,37 @@ def _run_geocode(task_id: str, addresses: list, column: str, workers: int, use_c
         processed = 0
         total = len(addresses)
 
+        # 如果有 location_prefix，添加到地址前
+        def process_address(addr: str) -> str:
+            if location_prefix and not addr.startswith(location_prefix):
+                return f"{location_prefix}{addr}"
+            return addr
+
         if workers > 1:
             from concurrent.futures import ThreadPoolExecutor, as_completed
             max_workers = min(workers, 10)
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                futures = {executor.submit(geocoder.geocode, addr): addr for addr in addresses}
+                futures = {executor.submit(geocoder.geocode, process_address(addr)): addr for addr in addresses}
                 for future in as_completed(futures):
                     addr = futures[future]
-                    results.append(future.result())
+                    result = future.result()
+                    # 保留原始地址
+                    if result and "original_address" not in result:
+                        result["original_address"] = addr
+                    results.append(result)
                     processed += 1
                     with _tasks_lock:
-                        _tasks[task_id]["progress"] = int(processed / total * 100)
+                        _tasks[task_id]["progress"] = processed
                         _tasks[task_id]["results"] = results
         else:
             for addr in addresses:
-                result = geocoder.geocode(addr)
+                result = geocoder.geocode(process_address(addr))
+                if result and "original_address" not in result:
+                    result["original_address"] = addr
                 results.append(result)
                 processed += 1
                 with _tasks_lock:
-                    _tasks[task_id]["progress"] = int(processed / total * 100)
+                    _tasks[task_id]["progress"] = processed
                     _tasks[task_id]["results"] = results
 
         geocoder.close()
@@ -307,7 +378,7 @@ def _run_geocode(task_id: str, addresses: list, column: str, workers: int, use_c
         with _tasks_lock:
             _tasks[task_id]["status"] = "done"
             _tasks[task_id]["results"] = results
-            _tasks[task_id]["progress"] = 100
+            _tasks[task_id]["progress"] = total
     except Exception as e:
         with _tasks_lock:
             _tasks[task_id]["status"] = "error"
@@ -418,7 +489,54 @@ def _render_index() -> str:
     </div>
     <div class="form-group">
       <label>并行线程数</label>
-      <select id="workers"><option value="1">1 (串行)</option><option value="2">2</option><option value="3">3</option><option value="5">5</option></select>
+      <select id="workers"><option value="auto">auto（自动）</option><option value="1">1 (串行)</option><option value="2">2</option><option value="3">3</option><option value="5">5</option></select>
+    </div>
+  </div>
+
+  <div class="form-row">
+    <div class="form-group">
+      <label>省/直辖市（可选）</label>
+      <select id="province" onchange="updateCities()">
+        <option value="">-- 不指定 --</option>
+        <option value="北京市">北京市</option>
+        <option value="天津市">天津市</option>
+        <option value="河北省">河北省</option>
+        <option value="山西省">山西省</option>
+        <option value="内蒙古自治区">内蒙古自治区</option>
+        <option value="辽宁省">辽宁省</option>
+        <option value="吉林省">吉林省</option>
+        <option value="黑龙江省">黑龙江省</option>
+        <option value="上海市">上海市</option>
+        <option value="江苏省">江苏省</option>
+        <option value="浙江省">浙江省</option>
+        <option value="安徽省">安徽省</option>
+        <option value="福建省">福建省</option>
+        <option value="江西省">江西省</option>
+        <option value="山东省">山东省</option>
+        <option value="河南省">河南省</option>
+        <option value="湖北省">湖北省</option>
+        <option value="湖南省">湖南省</option>
+        <option value="广东省">广东省</option>
+        <option value="广西壮族自治区">广西壮族自治区</option>
+        <option value="海南省">海南省</option>
+        <option value="重庆市">重庆市</option>
+        <option value="四川省">四川省</option>
+        <option value="贵州省">贵州省</option>
+        <option value="云南省">云南省</option>
+        <option value="西藏自治区">西藏自治区</option>
+        <option value="陕西省">陕西省</option>
+        <option value="甘肃省">甘肃省</option>
+        <option value="青海省">青海省</option>
+        <option value="宁夏回族自治区">宁夏回族自治区</option>
+        <option value="新疆维吾尔自治区">新疆维吾尔自治区</option>
+        <option value="台湾省">台湾省</option>
+        <option value="香港特别行政区">香港特别行政区</option>
+        <option value="澳门特别行政区">澳门特别行政区</option>
+      </select>
+    </div>
+    <div class="form-group">
+      <label>地/市（可选）</label>
+      <select id="city"><option value="">-- 不指定 --</option></select>
     </div>
   </div>
 
@@ -430,20 +548,230 @@ def _render_index() -> str:
       <span id="progressPercent">0%</span>
     </div>
     <div class="progress-bar"><div class="progress-fill" id="progressFill"></div></div>
+    <div id="progressETA" style="font-size:12px;color:#888;margin-top:4px"></div>
   </div>
 
   <div id="resultArea" style="margin-top:16px"></div>
 </div>
 
-<div class="card" style="display:none" id="mapCard">
-  <h2>地图预览</h2>
-  <button class="btn btn-secondary" style="margin-bottom:12px" onclick="loadMap()">加载地图</button>
-  <div id="mapContainer"></div>
+<div class="card">
+  <h2>已完成任务</h2>
+  <p style="color:#888;margin-bottom:12px">历史地理编码任务，常驻显示（最多保存 20 个）</p>
+  <div id="taskList" style="max-height:500px;overflow-y:auto"></div>
+</div>
+
+<div class="card" id="taskDetailCard" style="display:none">
+  <h2>任务明细</h2>
+  <button class="btn btn-secondary" style="margin-bottom:12px" onclick="closeTaskDetail()">关闭</button>
+  <div id="taskDetailContent" style="max-height:500px;overflow-y:auto"></div>
 </div>
 
 <script>
 let taskId = null;
 let pollTimer = null;
+let startTime = null;
+
+// 页面加载时恢复任务列表，自动轮询运行中的任务
+function loadRecentTasks() {
+  const tasks = JSON.parse(localStorage.getItem('geocodeTasks') || '[]');
+  renderTaskList(tasks);
+  // 自动轮询运行中的任务
+  tasks.forEach(function(t) {
+    if (t.status === 'running') {
+      pollRunningTask(t.id);
+    }
+  });
+}
+
+function saveTask(tid, total, filename, status) {
+  status = status || 'running';
+  const tasks = JSON.parse(localStorage.getItem('geocodeTasks') || '[]');
+  // 如果已存在则更新
+  const existing = tasks.findIndex(function(t) { return t.id === tid; });
+  const entry = {id: tid, total: total, filename: filename || '', status: status, success: 0, failed: 0, progress: 0, time: Date.now()};
+  if (existing >= 0) {
+    tasks[existing] = entry;
+  } else {
+    tasks.unshift(entry);
+  }
+  localStorage.setItem('geocodeTasks', JSON.stringify(tasks.slice(0, 20)));
+  renderTaskList(tasks.slice(0, 20));
+}
+
+function updateTaskStatus(tid, status, success, failed) {
+  const tasks = JSON.parse(localStorage.getItem('geocodeTasks') || '[]');
+  const idx = tasks.findIndex(function(t) { return t.id === tid; });
+  if (idx >= 0) {
+    tasks[idx].status = status;
+    tasks[idx].success = success || 0;
+    tasks[idx].failed = failed || 0;
+    tasks[idx].time = Date.now();
+    localStorage.setItem('geocodeTasks', JSON.stringify(tasks.slice(0, 20)));
+    renderTaskList(tasks.slice(0, 20));
+  }
+}
+
+function pollRunningTask(tid) {
+  fetch('/api/geocode/status/' + tid)
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      if (data.error) return;
+      if (data.status === 'done') {
+        fetch('/api/geocode/result/' + tid)
+          .then(function(r) { return r.json(); })
+          .then(function(d) {
+            updateTaskStatus(tid, 'done', d.success, d.failed);
+          });
+      } else if (data.status === 'error') {
+        updateTaskStatus(tid, 'error', 0, data.total || 0);
+      } else {
+        // 更新进度
+        const tasks = JSON.parse(localStorage.getItem('geocodeTasks') || '[]');
+        const idx = tasks.findIndex(function(t) { return t.id === tid; });
+        if (idx >= 0) {
+          tasks[idx].progress = data.progress || 0;
+          localStorage.setItem('geocodeTasks', JSON.stringify(tasks));
+        }
+        renderTaskList(JSON.parse(localStorage.getItem('geocodeTasks') || '[]'));
+        setTimeout(function() { pollRunningTask(tid); }, 3000);
+      }
+    });
+}
+
+function renderTaskList(tasks) {
+  let html = '';
+  if (tasks.length === 0) {
+    html = '<div style="padding:32px;text-align:center;color:#999;font-size:14px">暂无已完成任务<br><span style="font-size:12px">上传文件并点击"开始地理编码"后将在此显示</span></div>';
+  } else {
+    html += '<table style="width:100%;border-collapse:collapse;font-size:13px">';
+    html += '<thead><tr style="background:#f5f7fa;border-bottom:2px solid #e0e0e0">';
+    html += '<th style="padding:8px 10px;text-align:left;font-size:12px">任务ID</th>';
+    html += '<th style="padding:8px 10px;text-align:left;font-size:12px">文件</th>';
+    html += '<th style="padding:8px 10px;text-align:center;font-size:12px">总数</th>';
+    html += '<th style="padding:8px 10px;text-align:center;font-size:12px">成功</th>';
+    html += '<th style="padding:8px 10px;text-align:center;font-size:12px">失败</th>';
+    html += '<th style="padding:8px 10px;text-align:center;font-size:12px">状态</th>';
+    html += '<th style="padding:8px 10px;text-align:left;font-size:12px">时间</th>';
+    html += '<th style="padding:8px 10px;text-align:center;font-size:12px">操作</th>';
+    html += '</tr></thead><tbody>';
+    tasks.forEach(function(t) {
+      const timeStr = new Date(t.time).toLocaleString();
+      let statusClass, statusText;
+      if (t.status === 'done') { statusClass = 'tag-success'; statusText = '已完成'; }
+      else if (t.status === 'error') { statusClass = 'tag-fail'; statusText = '失败'; }
+      else { statusClass = 'tag-info'; statusText = '处理中 (' + (t.progress || 0) + '/' + (t.total || '?') + ')'; }
+      html += '<tr style="border-bottom:1px solid #f0f0f0">';
+      html += '<td style="padding:8px 10px;font-family:monospace;font-size:11px">' + t.id + '</td>';
+      html += '<td style="padding:8px 10px;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + (t.filename || '') + '">' + (t.filename || '-') + '</td>';
+      html += '<td style="padding:8px 10px;text-align:center">' + (t.total || '-') + '</td>';
+      html += '<td style="padding:8px 10px;text-align:center;color:#1e8e3e;font-weight:600">' + (t.status === 'done' ? t.success : '-') + '</td>';
+      html += '<td style="padding:8px 10px;text-align:center;color:#d93025;font-weight:600">' + (t.status === 'done' ? t.failed : '-') + '</td>';
+      html += '<td style="padding:8px 10px;text-align:center"><span class="tag ' + statusClass + '">' + statusText + '</span></td>';
+      html += '<td style="padding:8px 10px;color:#888;font-size:11px">' + timeStr + '</td>';
+      html += '<td style="padding:8px 10px;text-align:center">';
+      if (t.status === 'done') {
+        html += '<button class="btn btn-primary" style="padding:4px 12px;font-size:12px" onclick="viewTaskDetail(\'' + t.id + '\')">查看明细</button>';
+      } else if (t.status === 'running') {
+        html += '<button class="btn btn-secondary" style="padding:4px 12px;font-size:12px" onclick="pollRunningTask(\'' + t.id + '\')">刷新</button>';
+      } else {
+        html += '<span style="color:#d93025;font-size:11px">任务失败</span>';
+      }
+      html += '</td>';
+      html += '</tr>';
+    });
+    html += '</tbody></table>';
+  }
+  document.getElementById('taskList').innerHTML = html;
+}
+
+function viewTaskDetail(tid) {
+  fetch('/api/geocode/result/' + tid)
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      if (d.error) {
+        document.getElementById('taskDetailContent').innerHTML = '<p style="color:#d93025;padding:20px">' + d.error + '</p>';
+      } else {
+        let html = '<div style="margin-bottom:12px;padding:12px;background:#f5f7fa;border-radius:8px">';
+        html += '<strong>' + tid + '</strong> | 成功 <span style="color:#1e8e3e;font-weight:600">' + d.success + '</span> 条';
+        html += ' | 失败 <span style="color:#d93025;font-weight:600">' + d.failed + '</span> 条';
+        html += ' | 共 ' + (d.total || '?') + ' 条</div>';
+        html += '<div style="max-height:400px;overflow-y:auto;border:1px solid #eee;border-radius:8px">';
+        if (d.results && d.results.length > 0) {
+          d.results.forEach(function(r) {
+            html += '<div class="result-item">';
+            html += '<div style="font-weight:600">' + (r.original_address || '?') + '</div>';
+            html += '<div style="color:#1e8e3e;font-size:13px">' + (r.latitude||'?') + ', ' + (r.longitude||'?') + ' <span class="tag tag-info">' + (r.source || '') + '</span></div>';
+            if (r.formatted_address) html += '<div style="color:#888;font-size:12px">标准化: ' + r.formatted_address + '</div>';
+            html += '</div>';
+          });
+        } else {
+          html += '<p style="padding:20px;text-align:center;color:#888">无成功结果</p>';
+        }
+        html += '</div>';
+        document.getElementById('taskDetailContent').innerHTML = html;
+      }
+      document.getElementById('taskDetailCard').style.display = 'block';
+    })
+    .catch(function(e) {
+      document.getElementById('taskDetailContent').innerHTML = '<p style="color:#d93025;padding:20px">加载失败: ' + e.message + '</p>';
+      document.getElementById('taskDetailCard').style.display = 'block';
+    });
+}
+
+function closeTaskDetail() {
+  document.getElementById('taskDetailCard').style.display = 'none';
+}
+
+// 城市数据（部分主要城市）
+const cityData = {
+  '北京市': ['东城区', '西城区', '朝阳区', '海淀区', '丰台区', '石景山区', '门头沟区', '房山区', '通州区', '顺义区', '昌平区', '大兴区', '怀柔区', '平谷区', '密云区', '延庆区'],
+  '上海市': ['黄浦区', '徐汇区', '长宁区', '静安区', '普陀区', '虹口区', '杨浦区', '闵行区', '宝山区', '嘉定区', '浦东新区', '金山区', '松江区', '青浦区', '奉贤区', '崇明区'],
+  '天津市': ['和平区', '河东区', '河西区', '南开区', '河北区', '红桥区', '东丽区', '西青区', '津南区', '北辰区', '武清区', '宝坻区', '滨海新区', '宁河区', '静海区', '蓟州区'],
+  '重庆市': ['渝中区', '大渡口区', '江北区', '沙坪坝区', '九龙坡区', '南岸区', '北碚区', '渝北区', '巴南区', '万州区', '涪陵区', '永川区', '合川区', '江津区', '长寿区', '璧山区'],
+  '广东省': ['广州市', '深圳市', '珠海市', '汕头市', '佛山市', '韶关市', '湛江市', '肇庆市', '江门市', '茂名市', '惠州市', '梅州市', '汕尾市', '河源市', '阳江市', '清远市', '东莞市', '中山市', '潮州市', '揭阳市', '云浮市'],
+  '江苏省': ['南京市', '苏州市', '无锡市', '常州市', '镇江市', '南通市', '泰州市', '扬州市', '盐城市', '连云港市', '徐州市', '淮安市', '宿迁市'],
+  '浙江省': ['杭州市', '宁波市', '温州市', '嘉兴市', '湖州市', '绍兴市', '金华市', '衢州市', '舟山市', '台州市', '丽水市'],
+  '山东省': ['济南市', '青岛市', '淄博市', '枣庄市', '东营市', '烟台市', '潍坊市', '济宁市', '泰安市', '威海市', '日照市', '临沂市', '德州市', '聊城市', '滨州市', '菏泽市'],
+  '河南省': ['郑州市', '开封市', '洛阳市', '平顶山市', '安阳市', '鹤壁市', '新乡市', '焦作市', '濮阳市', '许昌市', '漯河市', '三门峡市', '南阳市', '商丘市', '信阳市', '周口市', '驻马店市'],
+  '湖北省': ['武汉市', '黄石市', '十堰市', '宜昌市', '襄阳市', '鄂州市', '荆门市', '孝感市', '荆州市', '黄冈市', '咸宁市', '随州市', '恩施州'],
+  '湖南省': ['长沙市', '株洲市', '湘潭市', '衡阳市', '邵阳市', '岳阳市', '常德市', '张家界市', '益阳市', '郴州市', '永州市', '怀化市', '娄底市', '湘西州'],
+  '四川省': ['成都市', '自贡市', '攀枝花市', '泸州市', '德阳市', '绵阳市', '广元市', '遂宁市', '内江市', '乐山市', '南充市', '眉山市', '宜宾市', '广安市', '达州市', '雅安市', '巴中市', '资阳市', '阿坝州', '甘孜州', '凉山州'],
+  '河北省': ['石家庄市', '唐山市', '秦皇岛市', '邯郸市', '邢台市', '保定市', '张家口市', '承德市', '沧州市', '廊坊市', '衡水市'],
+  '福建省': ['福州市', '厦门市', '漳州市', '泉州市', '三明市', '莆田市', '南平市', '龙岩市', '宁德市'],
+  '辽宁省': ['沈阳市', '大连市', '鞍山市', '抚顺市', '本溪市', '丹东市', '锦州市', '营口市', '阜新市', '辽阳市', '盘锦市', '铁岭市', '朝阳市', '葫芦岛市'],
+  '吉林省': ['长春市', '吉林市', '四平市', '辽源市', '通化市', '白山市', '松原市', '白城市', '延边州'],
+  '黑龙江省': ['哈尔滨市', '齐齐哈尔市', '鸡西市', '鹤岗市', '双鸭山市', '大庆市', '伊春市', '佳木斯市', '七台河市', '牡丹江市', '黑河市', '绥化市', '大兴安岭地区'],
+  '安徽省': ['合肥市', '芜湖市', '蚌埠市', '淮南市', '马鞍山市', '淮北市', '铜陵市', '安庆市', '黄山市', '滁州市', '阜阳市', '宿州市', '六安市', '亳州市', '池州市', '宣城市'],
+  '江西省': ['南昌市', '景德镇市', '萍乡市', '九江市', '新余市', '鹰潭市', '赣州市', '吉安市', '宜春市', '抚州市', '上饶市'],
+  '陕西省': ['西安市', '铜川市', '宝鸡市', '咸阳市', '渭南市', '延安市', '汉中市', '榆林市', '安康市', '商洛市'],
+  '甘肃省': ['兰州市', '嘉峪关市', '金昌市', '白银市', '天水市', '武威市', '张掖市', '平凉市', '酒泉市', '庆阳市', '定西市', '陇南市', '甘南州', '临夏州'],
+  '云南省': ['昆明市', '曲靖市', '玉溪市', '保山市', '昭通市', '丽江市', '普洱市', '临沧市', '楚雄州', '红河州', '文山州', '西双版纳州', '大理州', '德宏州', '怒江州', '迪庆州'],
+  '贵州省': ['贵阳市', '六盘水市', '遵义市', '安顺市', '毕节市', '铜仁市', '黔西南州', '黔东南州', '黔南州'],
+  '广西壮族自治区': ['南宁市', '柳州市', '桂林市', '梧州市', '北海市', '防城港市', '钦州市', '贵港市', '玉林市', '百色市', '贺州市', '河池市', '来宾市', '崇左市'],
+  '海南省': ['海口市', '三亚市', '三沙市', '儋州市', '琼海市', '文昌市', '万宁市', '东方市'],
+  '内蒙古自治区': ['呼和浩特市', '包头市', '乌海市', '赤峰市', '通辽市', '鄂尔多斯市', '呼伦贝尔市', '巴彦淖尔市', '乌兰察布市', '兴安盟', '锡林郭勒盟', '阿拉善盟'],
+  '新疆维吾尔自治区': ['乌鲁木齐市', '克拉玛依市', '吐鲁番市', '哈密市', '昌吉州', '博尔塔拉州', '巴音郭楞州', '阿克苏地区', '克孜勒苏州', '喀什地区', '和田地区', '伊犁州', '塔城地区', '阿勒泰地区'],
+  '西藏自治区': ['拉萨市', '日喀则市', '昌都市', '林芝市', '山南市', '那曲市', '阿里地区'],
+  '宁夏回族自治区': ['银川市', '石嘴山市', '吴忠市', '固原市', '中卫市'],
+  '青海省': ['西宁市', '海东市', '海北州', '黄南州', '海南州', '果洛州', '玉树州', '海西州'],
+};
+
+function updateCities() {
+  const prov = document.getElementById('province').value;
+  const citySel = document.getElementById('city');
+  citySel.innerHTML = '<option value="">-- 不指定 --</option>';
+  if (prov && cityData[prov]) {
+    cityData[prov].forEach(function(c) {
+      citySel.innerHTML += '<option value="' + c + '">' + c + '</option>';
+    });
+  }
+}
+
+function formatTime(seconds) {
+  if (seconds < 0 || !isFinite(seconds)) return '计算中...';
+  if (seconds < 60) return Math.round(seconds) + '秒';
+  return Math.round(seconds / 60) + '分钟';
+}
 
 document.getElementById('fileInput').addEventListener('change', function(e) {
   const f = e.target.files[0];
@@ -476,7 +804,10 @@ function startGeocode() {
   form.append('file', file);
   form.append('column', document.getElementById('colName').value);
   form.append('workers', document.getElementById('workers').value);
+  form.append('province', document.getElementById('province').value);
+  form.append('city', document.getElementById('city').value);
 
+  startTime = Date.now();
   document.getElementById('startBtn').disabled = true;
   document.getElementById('startBtn').textContent = '处理中...';
   document.getElementById('progressArea').style.display = 'block';
@@ -492,7 +823,8 @@ function startGeocode() {
         return;
       }
       taskId = data.task_id;
-      document.getElementById('mapCard').style.display = 'block';
+      // 立即保存任务到 localStorage（任务创建时即持久化）
+      saveTask(taskId, data.total, file.name, 'running');
       pollTask();
     });
 }
@@ -502,43 +834,59 @@ function pollTask() {
   fetch('/api/geocode/status/' + taskId)
     .then(r => r.json())
     .then(data => {
-      const pct = data.progress || 0;
+      const processed = data.progress || 0;
+      const total = data.total || 0;
+      const pct = total > 0 ? Math.round(processed / total * 100) : 0;
       document.getElementById('progressFill').style.width = pct + '%';
       document.getElementById('progressPercent').textContent = pct + '%';
-      document.getElementById('progressText').textContent = '已处理 ' + data.progress + '/' + data.total;
+      document.getElementById('progressText').textContent = '已处理 ' + processed + '/' + total;
+
+      // 计算预计用时
+      if (startTime && processed > 0 && total > 0) {
+        const elapsed = (Date.now() - startTime) / 1000;
+        const speed = processed / elapsed;
+        const remaining = (total - processed) / speed;
+        document.getElementById('progressETA').textContent = '预计剩余: ' + formatTime(remaining) + ' (速度: ' + speed.toFixed(1) + ' 条/秒)';
+      }
 
       if (data.status === 'done') {
         document.getElementById('startBtn').disabled = false;
         document.getElementById('startBtn').textContent = '开始地理编码';
+        clearInterval(pollTimer);
+        pollTimer = null;
         fetch('/api/geocode/result/' + taskId)
-          .then(r => r.json())
-          .then(d => {
+          .then(function(r) { return r.json(); })
+          .then(function(d) {
+            // 更新已完成任务状态
+            updateTaskStatus(taskId, 'done', d.success, d.failed);
             if (d.results) {
               let html = '<h3 style="margin-bottom:12px">结果 (' + d.success + ' 成功, ' + d.failed + ' 失败)</h3>';
-              d.results.slice(0, 50).forEach(r => {
-                html += '<div class="result-item"><span class="' + (r.success ? 'result-success' : 'result-fail') + '">'
-                  + (r.original_address || '?') + ' → ' + (r.latitude||'?') + ', ' + (r.longitude||'?')
-                  + '</span> <span class="tag tag-info">' + (r.source || '') + '</span></div>';
+              html += '<div style="max-height:400px;overflow-y:auto;border:1px solid #eee;border-radius:8px">';
+              d.results.forEach(function(r) {
+                html += '<div class="result-item">';
+                html += '<div style="font-weight:600">' + (r.original_address || '?') + '</div>';
+                html += '<div style="color:#1e8e3e;font-size:13px">' + (r.latitude||'?') + ', ' + (r.longitude||'?') + ' <span class="tag tag-info">' + (r.source || '') + '</span></div>';
+                if (r.formatted_address) html += '<div style="color:#888;font-size:12px">标准化: ' + r.formatted_address + '</div>';
+                html += '</div>';
               });
-              if (d.results.length > 50) html += '<p style="color:#888;margin-top:8px">仅显示前 50 条结果</p>';
+              html += '</div>';
               document.getElementById('resultArea').innerHTML = html;
             }
           });
-        clearInterval(pollTimer);
       } else if (data.status === 'error') {
         document.getElementById('resultArea').innerHTML = '<p style="color:#d93025">错误: ' + (data.error || '未知') + '</p>';
+        updateTaskStatus(taskId, 'error', 0, data.total || 0);
         clearInterval(pollTimer);
+        pollTimer = null;
+        document.getElementById('startBtn').disabled = false;
+        document.getElementById('startBtn').textContent = '开始地理编码';
       }
     });
   if (!pollTimer) pollTimer = setInterval(pollTask, 2000);
 }
 
-function loadMap() {
-  if (!taskId) return;
-  fetch('/api/map/' + taskId)
-    .then(r => r.text())
-    .then(html => { document.getElementById('mapContainer').innerHTML = html; });
-}
+// 页面加载时恢复任务列表
+loadRecentTasks();
 </script>"""
     return _base_html("地理编码", content, active="index")
 
@@ -547,42 +895,83 @@ def _render_map_viewer() -> str:
     content = """
 <div class="card">
   <h2>地图浏览</h2>
-  <p style="color:#888;margin-bottom:16px">完成地理编码任务后可在此查看地图</p>
-  <div class="form-group">
-    <label>任务 ID</label>
-    <div class="form-row">
-      <input type="text" id="mapTaskId" placeholder="输入任务 ID">
-      <button class="btn btn-primary" onclick="viewMap()" style="width:auto">加载地图</button>
-    </div>
+  <p style="color:#888;margin-bottom:16px">浏览 output/map 目录中的地图 HTML 文件，点击阅览按钮在新标签页打开</p>
+
+  <div style="margin-bottom:12px">
+    <button class="btn btn-primary" onclick="loadDefaultMaps()">刷新地图列表</button>
   </div>
-  <div id="mapContainer"></div>
+
+  <div id="mapInfo" style="font-size:13px;color:#888;margin-bottom:8px">加载中...</div>
 </div>
 
-<div class="card">
-  <h2>最近输出文件</h2>
-  <ul id="fileList" style="list-style:none;font-size:14px;color:#888">加载中...</ul>
+<div class="card" id="mapListCard">
+  <h3 style="font-size:16px;margin-bottom:12px;color:#555">地图文件列表</h3>
+  <div id="mapFileList" style="border:1px solid #eee;border-radius:8px;max-height:500px;overflow-y:auto"></div>
 </div>
 
 <script>
-function viewMap() {
-  const tid = document.getElementById('mapTaskId').value.trim();
-  if (!tid) return;
-  fetch('/api/map/' + tid)
-    .then(r => r.text())
-    .then(html => { document.getElementById('mapContainer').innerHTML = html; })
-    .catch(() => { document.getElementById('mapContainer').innerHTML = '<p style="color:#d93025">地图加载失败</p>'; });
+function jsEsc(str) {
+  return str.replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/\n/g, '\\n').replace(/\r/g, '\\r');
+}
+function htmlEsc(str) {
+  return str.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
-fetch('/api/quota').then(r => r.json()).then(d => {
-  let html = '';
-  if (d.api_usage) {
-    for (const [k, v] of Object.entries(d.api_usage)) {
-      html += '<li>&#8226; ' + k + ': ' + v + ' 次调用</li>';
-    }
-  }
-  html += '<li>&#8226; 缓存: ' + (d.cache_total || 0) + ' 条记录</li>';
-  document.getElementById('fileList').innerHTML = html || '<li>暂无数据</li>';
-});
+function loadDefaultMaps() {
+  document.getElementById('mapInfo').textContent = '加载中...';
+  fetch('/api/maps')
+    .then(function(r) { return r.json(); })
+    .then(function(files) {
+      const listEl = document.getElementById('mapFileList');
+      const infoEl = document.getElementById('mapInfo');
+
+      if (!files || files.length === 0) {
+        listEl.innerHTML = '<div style="padding:32px;text-align:center;color:#999">output/map 目录暂无地图文件</div>';
+        infoEl.textContent = 'output/map 目录为空';
+        return;
+      }
+
+      infoEl.textContent = '共 ' + files.length + ' 个地图文件（按修改时间排序）';
+      var html = '<table style="width:100%;border-collapse:collapse;font-size:13px">';
+      html += '<thead><tr style="background:#f5f7fa;border-bottom:2px solid #e0e0e0">';
+      html += '<th style="padding:8px 10px;text-align:left;font-size:12px">文件名</th>';
+      html += '<th style="padding:8px 10px;text-align:center;font-size:12px">大小</th>';
+      html += '<th style="padding:8px 10px;text-align:left;font-size:12px">修改时间</th>';
+      html += '<th style="padding:8px 10px;text-align:center;font-size:12px">操作</th>';
+      html += '</tr></thead><tbody>';
+      files.forEach(function(f) {
+        var sizeKB = (f.size / 1024).toFixed(1);
+        var mtimeStr = new Date(f.mtime * 1000).toLocaleString();
+        var escName = jsEsc(f.name);
+        var escNameHtml = htmlEsc(f.name);
+        html += '<tr style="border-bottom:1px solid #f0f0f0">';
+        html += '<td style="padding:8px 10px;font-family:monospace;font-size:12px;max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + escNameHtml + '">' + escNameHtml + '</td>';
+        html += '<td style="padding:8px 10px;text-align:center;color:#888;font-size:12px">' + sizeKB + ' KB</td>';
+        html += '<td style="padding:8px 10px;color:#888;font-size:11px">' + mtimeStr + '</td>';
+        html += '<td style="padding:8px 10px;text-align:center"><button class="btn btn-primary map-view-btn" style="padding:4px 16px;font-size:12px" data-file="' + escNameHtml + '">阅览</button></td>';
+        html += '</tr>';
+      });
+      html += '</tbody></table>';
+      listEl.innerHTML = html;
+      // 用事件委托绑定阅览按钮
+      var buttons = listEl.querySelectorAll('.map-view-btn');
+      for (var i = 0; i < buttons.length; i++) {
+        buttons[i].addEventListener('click', function() {
+          openMapFile(this.getAttribute('data-file'));
+        });
+      }
+    })
+    .catch(function(e) {
+      document.getElementById('mapInfo').textContent = '加载失败: ' + e.message;
+      document.getElementById('mapFileList').innerHTML = '<div style="padding:32px;text-align:center;color:#d93025">加载失败: ' + e.message + '</div>';
+    });
+}
+
+function openMapFile(filename) {
+  window.open('/api/map/view/' + encodeURIComponent(filename), '_blank');
+}
+
+loadDefaultMaps();
 </script>"""
     return _base_html("地图浏览", content, active="map")
 

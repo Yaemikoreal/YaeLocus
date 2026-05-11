@@ -7,7 +7,7 @@ from rich.panel import Panel
 from rich.table import Table
 
 from ..utils import console, OK, FAIL, WARN
-from ...config import Config, PROJECT_DIR
+from ...config import Config, PROJECT_DIR, OutputPaths
 
 
 def setup():
@@ -80,6 +80,70 @@ def setup():
             f.write(f"{key}={val}\n")
 
     console.print(f"\n[green]{OK} 配置已保存到 {env_path}[/green]")
+
+
+def status(json_output: bool = typer.Option(False, "--json", "-j", help="JSON 格式输出")):
+    """快速查看当前配置状态"""
+    import json as json_module
+
+    config = Config()
+
+    # 收集状态数据
+    apis = config.get_available_apis()
+    ai_enabled = config.AI_ENABLED
+    ai_providers = config.get_available_ai_providers()
+
+    data_dir = PROJECT_DIR / "data"
+    output_dir = OutputPaths.ROOT
+
+    # 缓存统计
+    try:
+        from ...cache import CacheManager
+        with CacheManager() as cache:
+            cache_stats = cache.get_stats()
+    except Exception:
+        cache_stats = {"total_entries": 0, "hit_rate": 0}
+
+    if json_output:
+        result = {
+            "apis": apis,
+            "ai_enabled": ai_enabled,
+            "ai_providers": ai_providers,
+            "data_dir": str(data_dir) if data_dir.exists() else None,
+            "output_dir": str(output_dir),
+            "cache_entries": cache_stats.get("total_entries", 0),
+            "cache_hit_rate": cache_stats.get("hit_rate", 0),
+        }
+        console.print(json_module.dumps(result, indent=2))
+        return
+
+    # Rich 表格显示
+    table = Table(show_header=True, header_style="bold cyan")
+    table.add_column("项目", style="cyan")
+    table.add_column("状态")
+
+    # API 配置
+    api_status = ", ".join(apis) if apis else "[red]未配置[/red]"
+    table.add_row("地理编码 API", api_status)
+
+    # AI 配置
+    if ai_enabled and ai_providers:
+        ai_status = f"启用 ({', '.join(ai_providers)})"
+    elif ai_enabled:
+        ai_status = "[yellow]启用 (未配置供应商)[/yellow]"
+    else:
+        ai_status = "禁用"
+    table.add_row("AI 功能", ai_status)
+
+    # 路径
+    data_status = str(data_dir) if data_dir.exists() else "[yellow]不存在[/yellow]"
+    table.add_row("输入目录 (data)", data_status)
+    table.add_row("输出目录 (output)", str(output_dir))
+
+    # 缓存
+    table.add_row("缓存条目", str(cache_stats.get("total_entries", 0)))
+
+    console.print(table)
 
 
 def check():

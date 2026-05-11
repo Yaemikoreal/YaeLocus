@@ -16,13 +16,14 @@ import sys
 import threading
 import time
 import uuid
-from io import StringIO
+from io import BytesIO, StringIO
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from . import __version__
 from .ai.client import AIClient
@@ -208,6 +209,18 @@ def create_api_app() -> FastAPI:
                 })
         return {"maps": maps, "count": len(maps)}
 
+    @app.get("/api/map/view/{filename}")
+    async def view_map_file(filename: str):
+        """在新标签页打开地图 HTML 文件"""
+        map_dir = OutputPaths.MAP
+        safe_name = os.path.basename(filename)
+        file_path = map_dir / safe_name
+        if not file_path.exists():
+            raise HTTPException(404, "文件不存在")
+        if file_path.suffix.lower() != ".html":
+            raise HTTPException(400, "仅支持 HTML 文件")
+        return FileResponse(str(file_path), media_type="text/html")
+
     # ── 地理编码 ──────────────────────────────────────────────────
 
     @app.post("/api/geocode/single")
@@ -310,45 +323,48 @@ def create_api_app() -> FastAPI:
         return task
 
     @app.post("/api/geocode/batch/stream")
-    async def geocode_batch_stream(req: Request):
+    async def geocode_batch_stream(
+        file: UploadFile = File(...),
+        column: str = Form("地址"),
+        workers: str = Form("auto"),
+    ):
         """批量地理编码 — SSE 进度流（多步骤可视化）"""
-        body = await req.json()
-        file_path = body.get("file", "")
-        column = body.get("column", "地址")
+        if not file.filename:
+            raise HTTPException(400, "未选择文件")
 
-        if not file_path:
-            raise HTTPException(400, "缺少 file 参数")
-
-        input_path = resolve_path(file_path)
-        if not input_path.exists():
-            raise HTTPException(404, f"文件不存在: {file_path}")
+        content = await file.read()
 
         async def generate_progress():
             try:
                 import pandas as pd
                 geocoder = _get_geocoder()
-                path_str = str(input_path)
+                filename = file.filename or "uploaded"
 
                 # 步骤 1: 读取文件
                 yield f"data: {json.dumps({'step': 'reading', 'label': '读取文件', 'status': 'running'}, ensure_ascii=False)}\n\n"
 
-                if input_path.suffix.lower() in (".xlsx", ".xls"):
-                    df = pd.read_excel(path_str)
+                ext = Path(filename).suffix.lower()
+                if ext in (".xlsx", ".xls"):
+                    engine = "openpyxl" if ext == ".xlsx" else "xlrd"
+                    df = pd.read_excel(BytesIO(content), engine=engine)
                 else:
-                    df = pd.read_csv(path_str, encoding="utf-8-sig")
+                    df = pd.read_csv(BytesIO(content), encoding="utf-8-sig")
 
                 total = len(df)
                 yield f"data: {json.dumps({'step': 'reading', 'label': '读取文件', 'status': 'done', 'total': total}, ensure_ascii=False)}\n\n"
 
                 # 步骤 2: 处理地址
                 if column not in df.columns:
-                    error_msg = f"列 '{column}' 不存在"
+                    error_msg = f"列 '{column}' 不存在，可用列: {list(df.columns)}"
                     yield f"data: {json.dumps({'error': error_msg, 'step': 'processing'}, ensure_ascii=False)}\n\n"
                     return
 
                 addresses = df[column].dropna().astype(str).tolist()
-                total = len(addresses)
+                if len(addresses) == 0:
+                    yield f"data: {json.dumps({'error': '未找到有效地址', 'step': 'processing'}, ensure_ascii=False)}\n\n"
+                    return
 
+                total = len(addresses)
                 yield f"data: {json.dumps({'step': 'processing', 'label': '处理地址', 'status': 'running', 'total': total, 'current': 0}, ensure_ascii=False)}\n\n"
 
                 results = []
@@ -359,7 +375,6 @@ def create_api_app() -> FastAPI:
                     if result.get("success"):
                         success_count += 1
 
-                    # 每 10 条推送一次进度
                     if (i + 1) % 10 == 0 or i == total - 1:
                         yield f"data: {json.dumps({'step': 'processing', 'label': '处理地址', 'status': 'running', 'total': total, 'current': i + 1, 'success': success_count}, ensure_ascii=False)}\n\n"
 
@@ -372,7 +387,7 @@ def create_api_app() -> FastAPI:
                 df["latitude"] = [r.get("latitude") if r else None for r in results]
                 df["source"] = [r.get("source") if r else None for r in results]
 
-                stem = input_path.stem
+                stem = Path(filename).stem
                 csv_path = OutputPaths.CSV / f"{stem}.csv"
                 df.to_csv(csv_path, index=False, encoding="utf-8-sig")
 
@@ -613,6 +628,11 @@ def create_api_app() -> FastAPI:
         import webbrowser
         webbrowser.open(str(full_path.absolute()))
         return {"opened": str(full_path.absolute())}
+
+    # ── 挂载 Web GUI (如果已构建) ──────────────────────────────
+    web_dist = (Path(__file__).parent.parent / "web_gui" / "dist").resolve()
+    if web_dist.exists() and (web_dist / "index.html").exists():
+        app.mount("/", StaticFiles(directory=str(web_dist), html=True), name="web_gui")
 
     return app
 
