@@ -695,6 +695,26 @@ window.addEventListener('load', function() {
     var _pm=null;
     function _pb(){for(var k in window){if(k.startsWith('map_')&&window[k] instanceof L.Map){_pm=window[k];break}}if(!_pm){setTimeout(_pb,500);return}_pm.on('popupopen',function(){if(typeof updatePopupButtons==='function'){setTimeout(updatePopupButtons,50)}})}_pb();
 })();
+
+// ========== 面板折叠切换 ==========
+
+function toggleDistancePanel() {
+    var body = document.getElementById('distance-panel-body');
+    var btn = document.getElementById('distance-toggle-btn');
+    if (body && btn) {
+        body.style.display = 'block';
+        btn.style.display = 'none';
+    }
+}
+
+function collapseDistancePanel() {
+    var body = document.getElementById('distance-panel-body');
+    var btn = document.getElementById('distance-toggle-btn');
+    if (body && btn) {
+        body.style.display = 'none';
+        btn.style.display = 'flex';
+    }
+}
 </script>
 """
 
@@ -703,7 +723,7 @@ _SHARED_JS_FILENAME = "distance.js"
 
 
 def _ensure_shared_js(output_dir: Path) -> Path:
-    """将测距 JS 写入输出目录，多个地图共享一份"""
+    """将测距 JS 写入输出目录，多个地图共享一份（始终写入最新版本）"""
     js_path = output_dir / _SHARED_JS_FILENAME
     # 提取 <script>...</script> 标签内的纯 JS 代码
     raw = DISTANCE_JS.strip()
@@ -712,23 +732,38 @@ def _ensure_shared_js(output_dir: Path) -> Path:
     if raw.endswith("</script>"):
         raw = raw[:-len("</script>")]
     raw = raw.strip()
-    if not js_path.exists():
-        js_path.write_text(raw, encoding="utf-8")
+    js_path.write_text(raw, encoding="utf-8")
     return js_path
 
 
-# 测距面板 HTML 模板 - 与地图风格统一
+# 测距面板 HTML 模板 - 右下角折叠式浮动按钮 + 展开面板
 DISTANCE_PANEL = """
-<div id="distance-panel" style="position: fixed; top: 10px; right: 10px; z-index: 9999;
-            background-color: white; padding: 10px; border-radius: 5px;
-            box-shadow: 0 2px 5px rgba(0,0,0,0.2); min-width: 200px; max-width: 280px;
+<div id="distance-toggle-btn" onclick="toggleDistancePanel()" title="距离测算"
+     style="position: fixed; bottom: 20px; right: 20px; z-index: 9999;
+            width: 44px; height: 44px; border-radius: 50%;
+            background: #4a90d9; color: white; border: none;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.25); cursor: pointer;
+            display: flex; align-items: center; justify-content: center;
+            font-size: 20px; transition: transform 0.2s, box-shadow 0.2s;"
+     onmouseover="this.style.transform='scale(1.1)';this.style.boxShadow='0 6px 16px rgba(0,0,0,0.3)'"
+     onmouseout="this.style.transform='scale(1)';this.style.boxShadow='0 4px 12px rgba(0,0,0,0.25)'">&#128207;</div>
+
+<div id="distance-panel-body" style="position: fixed; bottom: 20px; right: 20px; z-index: 9998; display: none;
+            background-color: white; padding: 12px; border-radius: 8px;
+            box-shadow: 0 4px 16px rgba(0,0,0,0.18); min-width: 220px; max-width: 300px;
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;">
-    <p style="margin: 0; font-weight: bold; font-size: 14px; color: #333;">距离测算</p>
+    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+        <p style="margin: 0; font-weight: bold; font-size: 14px; color: #333;">距离测算</p>
+        <button onclick="collapseDistancePanel()" title="折叠"
+                style="width: 24px; height: 24px; border-radius: 50%; border: 1px solid #dee2e6;
+                       background: #f8f9fa; color: #666; cursor: pointer; font-size: 14px;
+                       line-height: 22px; text-align: center; padding: 0;">&times;</button>
+    </div>
     <div style="margin-top: 8px; display: flex; gap: 5px;">
         <button id="mode-two-point" onclick="switchMode('two-point')"
-                style="flex: 1; padding: 5px 10px; font-size: 12px; background: #4a90d9; color: white; border: none; border-radius: 3px; cursor: pointer; transition: all 0.2s;">两点测距</button>
+                style="flex: 1; padding: 5px 10px; font-size: 12px; background: #4a90d9; color: white; border: none; border-radius: 4px; cursor: pointer; transition: all 0.2s;">两点测距</button>
         <button id="mode-route" onclick="switchMode('route')"
-                style="flex: 1; padding: 5px 10px; font-size: 12px; background: #f8f9fa; color: #333; border: 1px solid #dee2e6; border-radius: 3px; cursor: pointer; transition: all 0.2s;">多点路径</button>
+                style="flex: 1; padding: 5px 10px; font-size: 12px; background: #f8f9fa; color: #333; border: 1px solid #dee2e6; border-radius: 4px; cursor: pointer; transition: all 0.2s;">多点路径</button>
     </div>
 
     <div id="two-point-panel" style="margin-top: 10px; padding-top: 8px; border-top: 1px solid #eee;">
@@ -743,23 +778,23 @@ DISTANCE_PANEL = """
                 终点: <span id="end-point" style="color: #e74c3c; margin-left: 4px;">未选择</span>
             </p>
         </div>
-        <div id="distance-result" style="margin-top: 6px; padding: 6px; background: #f8f9fa; border-radius: 3px; font-size: 12px; color: #333;"></div>
-        <button onclick="clearDistance()" style="margin-top: 8px; width: 100%; padding: 6px 12px; font-size: 12px; background: #f8f9fa; color: #333; border: 1px solid #dee2e6; border-radius: 3px; cursor: pointer; transition: all 0.2s;">清除选择</button>
+        <div id="distance-result" style="margin-top: 6px; padding: 6px; background: #f8f9fa; border-radius: 4px; font-size: 12px; color: #333;"></div>
+        <button onclick="clearDistance()" style="margin-top: 8px; width: 100%; padding: 6px 12px; font-size: 12px; background: #f8f9fa; color: #333; border: 1px solid #dee2e6; border-radius: 4px; cursor: pointer; transition: all 0.2s;">清除选择</button>
     </div>
 
     <div id="route-panel" style="display: none; margin-top: 10px; padding-top: 8px; border-top: 1px solid #eee;">
         <div style="display: flex; gap: 4px; margin-bottom: 6px;">
-            <button id="origin-btn" onclick="startSetOrigin()" style="flex: 1; padding: 5px 8px; font-size: 11px; background: #f8f9fa; color: #333; border: 1px solid #dee2e6; border-radius: 3px; cursor: pointer;">设置起点</button>
-            <button onclick="saveRouteData()" style="padding: 5px 8px; font-size: 11px; background: #2ecc71; color: white; border: none; border-radius: 3px; cursor: pointer;">保存</button>
-            <button onclick="loadRouteData()" style="padding: 5px 8px; font-size: 11px; background: #4a90d9; color: white; border: none; border-radius: 3px; cursor: pointer;">加载</button>
+            <button id="origin-btn" onclick="startSetOrigin()" style="flex: 1; padding: 5px 8px; font-size: 11px; background: #f8f9fa; color: #333; border: 1px solid #dee2e6; border-radius: 4px; cursor: pointer;">设置起点</button>
+            <button onclick="saveRouteData()" style="padding: 5px 8px; font-size: 11px; background: #2ecc71; color: white; border: none; border-radius: 4px; cursor: pointer;">保存</button>
+            <button onclick="loadRouteData()" style="padding: 5px 8px; font-size: 11px; background: #4a90d9; color: white; border: none; border-radius: 4px; cursor: pointer;">加载</button>
         </div>
         <div id="origin-info" style="font-size: 11px; margin-bottom: 4px; color: #e74c3c;"></div>
         <p style="margin: 0; font-size: 11px; color: #666;">点击标记点的"记录点"按钮添加</p>
-        <div id="record-list" style="font-size: 11px; max-height: 100px; overflow-y: auto; margin-top: 5px; padding: 4px; background: #f8f9fa; border-radius: 3px;"></div>
+        <div id="record-list" style="font-size: 11px; max-height: 100px; overflow-y: auto; margin-top: 5px; padding: 4px; background: #f8f9fa; border-radius: 4px;"></div>
         <p style="margin: 6px 0 0 0; font-size: 11px; color: #666;">分段距离:</p>
-        <div id="route-segments" style="font-size: 11px; color: #333; max-height: 80px; overflow-y: auto; padding: 4px; background: #f8f9fa; border-radius: 3px;"></div>
-        <div id="route-result" style="margin-top: 6px; padding: 6px; background: #f8f9fa; border-radius: 3px; font-size: 12px; color: #333;"></div>
-        <button onclick="clearRoute()" style="margin-top: 8px; width: 100%; padding: 6px 12px; font-size: 12px; background: #f8f9fa; color: #333; border: 1px solid #dee2e6; border-radius: 3px; cursor: pointer; transition: all 0.2s;">清除路径</button>
+        <div id="route-segments" style="font-size: 11px; color: #333; max-height: 80px; overflow-y: auto; padding: 4px; background: #f8f9fa; border-radius: 4px;"></div>
+        <div id="route-result" style="margin-top: 6px; padding: 6px; background: #f8f9fa; border-radius: 4px; font-size: 12px; color: #333;"></div>
+        <button onclick="clearRoute()" style="margin-top: 8px; width: 100%; padding: 6px 12px; font-size: 12px; background: #f8f9fa; color: #333; border: 1px solid #dee2e6; border-radius: 4px; cursor: pointer; transition: all 0.2s;">清除路径</button>
     </div>
 
     <p style="margin-top: 10px; font-size: 10px; color: #999; border-top: 1px solid #eee; padding-top: 6px;">基于 WGS-84 坐标系计算</p>
@@ -831,8 +866,8 @@ def create_map(
             orig_addr = item.get("original_address", "N/A") or "N/A"
             formatted_addr = item.get("formatted_address", "N/A") or "N/A"
             coord_sys = item.get("coordinate_system", "N/A") or "N/A"
-            addr_js = json.dumps(orig_addr)
-            source_js = json.dumps(source)
+            addr_js = html.escape(json.dumps(orig_addr), quote=True)
+            source_js = html.escape(json.dumps(source), quote=True)
 
             popup_html = f"""
             <b>地址:</b> {html.escape(orig_addr)}<br>
@@ -866,8 +901,8 @@ def create_map(
             orig_addr = item.get("original_address", "N/A") or "N/A"
             formatted_addr = item.get("formatted_address", "N/A") or "N/A"
             coord_sys = item.get("coordinate_system", "N/A") or "N/A"
-            addr_js = json.dumps(orig_addr)
-            source_js = json.dumps(source)
+            addr_js = html.escape(json.dumps(orig_addr), quote=True)
+            source_js = html.escape(json.dumps(source), quote=True)
 
             popup_html = f"""
             <b>地址:</b> {html.escape(orig_addr)}<br>
@@ -1454,19 +1489,20 @@ def create_map_with_routes(
         source = item.get("source", "unknown")
         color = source_colors.get(source, "gray")
         addr = item.get("original_address", "")
-        addr_escaped = addr.replace("'", "\\'") if addr else ""
+        addr_js = html.escape(json.dumps(addr), quote=True) if addr else '""'
+        source_js = html.escape(json.dumps(source), quote=True)
         popup_html = (
-            f"<b>地址:</b> {item.get('original_address', '')}<br>"
-            f"<b>标准化:</b> {item.get('formatted_address', '')}<br>"
+            f"<b>地址:</b> {html.escape(item.get('original_address', ''))}<br>"
+            f"<b>标准化:</b> {html.escape(item.get('formatted_address', ''))}<br>"
             f"<b>坐标:</b> {lat:.6f}, {lon:.6f}<br>"
-            f"<b>来源:</b> {source}"
+            f"<b>来源:</b> {html.escape(source)}"
             f"<hr style='margin:5px 0;border-color:#eee;'>"
             f"<div style='font-size:11px;'>"
-            f"<button onclick=\"setDistancePoint('start',{gcj_lat},{gcj_lon},'{addr_escaped}','{source}')\""
+            f"<button onclick=\"setDistancePoint('start',{gcj_lat},{gcj_lon},{addr_js},{source_js})\""
             f" style='padding:3px 8px;margin:2px;background:#2ecc71;color:white;border:none;border-radius:3px;cursor:pointer;'>设为起点</button>"
-            f"<button onclick=\"setDistancePoint('end',{gcj_lat},{gcj_lon},'{addr_escaped}','{source}')\""
+            f"<button onclick=\"setDistancePoint('end',{gcj_lat},{gcj_lon},{addr_js},{source_js})\""
             f" style='padding:3px 8px;margin:2px;background:#e74c3c;color:white;border:none;border-radius:3px;cursor:pointer;'>设为终点</button>"
-            f"<button onclick=\"addRecordPoint({gcj_lat},{gcj_lon},'{addr_escaped}','{source}')\""
+            f"<button onclick=\"addRecordPoint({gcj_lat},{gcj_lon},{addr_js},{source_js})\""
             f" style='padding:3px 8px;margin:2px;background:#4a90d9;color:white;border:none;border-radius:3px;cursor:pointer;display:none;'>记录点</button>"
             f"</div>"
         )
