@@ -1,7 +1,7 @@
 import { useState, useRef, useCallback } from 'react'
 import { chatStream } from '../../lib/api'
 import type { ChatMessage } from '../../lib/types'
-import { Send, Loader2, Bot, User } from 'lucide-react'
+import { Send, Loader2, Bot, User, Square } from 'lucide-react'
 
 export default function ChatPanel() {
   const [messages, setMessages] = useState<ChatMessage[]>([])
@@ -47,12 +47,19 @@ export default function ChatPanel() {
         setStreaming(false)
       },
       (err) => {
+        // 移除不完整的 assistant 消息
+        setMessages(updatedMessages)
         setError(err)
         setStreaming(false)
       },
       controller.signal
     )
   }, [input, messages, streaming])
+
+  const handleCancel = useCallback(() => {
+    abortRef.current?.abort()
+    setStreaming(false)
+  }, [])
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -140,18 +147,30 @@ export default function ChatPanel() {
             fontSize: 14, outline: 'none', fontFamily: 'inherit', resize: 'none',
           }}
         />
-        <button
-          onClick={handleSend}
-          disabled={streaming || !input.trim()}
-          style={{
-            padding: '10px 20px', background: streaming ? '#ccc' : '#ff9d4d', color: 'rgba(20,20,19,0.88)',
-            border: 'none', borderRadius: 10, fontSize: 14, fontWeight: 600, cursor: streaming ? 'not-allowed' : 'pointer',
-            display: 'flex', alignItems: 'center', gap: 6, alignSelf: 'flex-end',
-          }}
-        >
-          {streaming ? <Loader2 size={16} style={{ animation: 'spin 1s linear infinite' }} /> : <Send size={16} />}
-          发送
-        </button>
+        {streaming ? (
+          <button
+            onClick={handleCancel}
+            style={{
+              padding: '10px 20px', background: '#d93025', color: 'white',
+              border: 'none', borderRadius: 10, fontSize: 14, fontWeight: 600, cursor: 'pointer',
+              display: 'flex', alignItems: 'center', gap: 6, alignSelf: 'flex-end',
+            }}
+          >
+            <Square size={16} /> 停止
+          </button>
+        ) : (
+          <button
+            onClick={handleSend}
+            disabled={!input.trim()}
+            style={{
+              padding: '10px 20px', background: input.trim() ? '#ff9d4d' : '#ccc', color: 'rgba(20,20,19,0.88)',
+              border: 'none', borderRadius: 10, fontSize: 14, fontWeight: 600, cursor: input.trim() ? 'pointer' : 'not-allowed',
+              display: 'flex', alignItems: 'center', gap: 6, alignSelf: 'flex-end',
+            }}
+          >
+            <Send size={16} /> 发送
+          </button>
+        )}
       </div>
     </div>
   )

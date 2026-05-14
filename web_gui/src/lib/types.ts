@@ -3,15 +3,16 @@ export interface GeocodeResult {
   success: boolean;
   latitude: number;
   longitude: number;
-  original_address: string;
+  original_address?: string;
   formatted_address?: string | null;
   province?: string | null;
   city?: string | null;
   district?: string | null;
-  source: 'amap' | 'tianditu' | 'baidu';
-  coordinate_system: 'GCJ-02' | 'BD-09' | 'CGCS2000';
+  source?: 'amap' | 'tianditu' | 'baidu' | string;
+  coordinate_system?: 'GCJ-02' | 'BD-09' | 'CGCS2000' | string;
   confidence?: ConfidenceScore | null;
   warning?: string | null;
+  error?: string | null;
 }
 
 export interface ConfidenceScore {
@@ -25,15 +26,6 @@ export interface ConfidenceScore {
 }
 
 export type TaskStatus = 'running' | 'done' | 'error';
-
-export interface TaskInfo {
-  task_id: string;
-  status: TaskStatus;
-  progress: number;
-  total: number;
-  results: GeocodeResult[];
-  error?: string | null;
-}
 
 // ── 地图文件 ──
 export interface MapFile {
@@ -57,8 +49,11 @@ export interface CacheStats {
   misses: number;
   hit_rate: number;
   total_entries: number;
-  expired_entries: number;
-  pending_writes: number;
+  mem_entries?: number;
+  mem_max?: number;
+  expired_entries?: number;
+  queue_size?: number;
+  pending_writes?: number;
 }
 
 // ── API 配置 ──
@@ -92,24 +87,7 @@ export interface HealthInfo {
   ai_enabled: boolean;
 }
 
-// ── 文件列表响应 ──
-export interface FilesResponse {
-  files: DataFile[];
-  count: number;
-}
-
-export interface MapsResponse {
-  maps: MapFile[];
-  count: number;
-}
-
 // ── 批量任务响应 ──
-export interface BatchStartResponse {
-  task_id: string;
-  status: string;
-  total?: number;
-}
-
 export interface BatchStatusResponse {
   task_id: string;
   status: TaskStatus;
@@ -119,29 +97,33 @@ export interface BatchStatusResponse {
   results?: GeocodeResult[];
 }
 
+// ── 已完成任务历史 ──
+export interface CompletedTask {
+  task_id: string;
+  status: 'running' | 'done' | 'error';
+  input_file: string;
+  column: string;
+  city?: string | null;
+  total: number;
+  success: number;
+  failed: number;
+  csv_output?: string | null;
+  map_output?: string | null;
+  started_at: number;
+  completed_at?: number | null;
+  error?: string | null;
+  results?: GeocodeResult[];
+}
+
+export interface TasksResponse {
+  tasks: CompletedTask[];
+  count: number;
+}
+
 // ── AI 消息 ──
 export interface ChatMessage {
   role: 'user' | 'assistant' | 'system';
   content: string;
-}
-
-export interface ChatRequest {
-  prompt: string;
-  context: ChatMessage[];
-}
-
-// ── SSE 事件 ──
-export interface SSEProgressEvent {
-  step: string;
-  label: string;
-  status: string;
-  total: number;
-  current: number;
-  success: number;
-}
-
-export interface SSETokenEvent {
-  token: string;
 }
 
 // ── 配置保存 ──
@@ -155,7 +137,7 @@ export interface ConfigSaveRequest {
 }
 
 export interface ConfigTestResponse {
-  amap?: boolean;
-  baidu?: boolean;
-  tianditu?: boolean;
+  amap?: boolean | null;
+  baidu?: boolean | null;
+  tianditu?: boolean | null;
 }

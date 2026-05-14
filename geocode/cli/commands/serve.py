@@ -2,7 +2,11 @@
 服务命令：启动 API 服务器 / Web GUI
 """
 
+import json
+import signal
+import socket
 import subprocess
+import sys
 from pathlib import Path
 
 import typer
@@ -10,6 +14,52 @@ import typer
 from ..utils import console
 from ... import __version__
 from ...config import PROJECT_DIR
+
+# 端口文件路径
+_PORT_FILE = Path.home() / ".yaelocus_port.json"
+
+
+def _find_available_port(host: str, start_port: int, max_attempts: int = 10) -> int:
+    """尝试找到可用端口，优先递增端口
+
+    Args:
+        host: 监听地址
+        start_port: 起始端口
+        max_attempts: 最大尝试次数
+
+    Returns:
+        可用的端口号
+    """
+    # 尝试递增端口
+    for offset in range(max_attempts):
+        port = start_port + offset
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.bind((host, port))
+                return port
+        except OSError:
+            continue
+
+    # 全部失败，使用随机端口
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind((host, 0))
+        return s.getsockname()[1]
+
+
+def _cleanup_port_file() -> None:
+    """清理端口文件"""
+    try:
+        if _PORT_FILE.exists():
+            _PORT_FILE.unlink()
+    except Exception:
+        pass
+
+
+def _signal_handler(signum, frame) -> None:
+    """处理 Ctrl+C 信号"""
+    console.print("\n[yellow]正在停止服务...[/yellow]")
+    _cleanup_port_file()
+    sys.exit(0)
 
 
 def _ensure_frontend_built(web_gui_dir: Path) -> None:
@@ -24,7 +74,7 @@ def _ensure_frontend_built(web_gui_dir: Path) -> None:
 
     # 1. 检查 Node.js
     try:
-        subprocess.run(["node", "--version"], capture_output=True, check=True)
+        subprocess.run(["node", "--version"], capture_output=True, check=True, shell=True)
     except (FileNotFoundError, subprocess.CalledProcessError):
         console.print("[red]未检测到 Node.js，Web GUI 需要 Node.js 运行时[/red]")
         console.print("[dim]请安装 Node.js: https://nodejs.org/[/dim]")
@@ -61,6 +111,7 @@ def _ensure_frontend_built(web_gui_dir: Path) -> None:
                 ["npm", "install"],
                 cwd=str(web_gui_dir),
                 check=True,
+                shell=True,
             )
         except subprocess.CalledProcessError:
             console.print("[red]npm install 失败，请检查 npm 是否已安装[/red]")
@@ -76,6 +127,7 @@ def _ensure_frontend_built(web_gui_dir: Path) -> None:
                 ["npm", "run", "build"],
                 cwd=str(web_gui_dir),
                 check=True,
+                shell=True,
             )
         except subprocess.CalledProcessError:
             console.print("[red]前端构建失败，请检查错误信息[/red]")
@@ -95,12 +147,10 @@ def register_serve(app: typer.Typer):
         port: int = typer.Option(8765, "--port", "-p", help="监听端口"),
         no_gui: bool = typer.Option(False, "--no-gui", help="仅启动 API 服务器（不打开浏览器）"),
     ):
-        """启动 API 服务器（旧版 Web GUI）
+        """启动 API 服务器
 
-        默认启动 FastAPI 服务器并在浏览器中打开旧版 Web GUI。
-        使用 --no-gui 仅启动服务器不打开浏览器。
-
-        新版 GUI 请使用: yaelocus gui
+        启动 FastAPI 服务器，提供 REST API 和 Web GUI（需构建前端）。
+        新版 React GUI: yaelocus gui
 
         示例:
             yaelocus serve
@@ -108,21 +158,43 @@ def register_serve(app: typer.Typer):
             yaelocus serve --no-gui
         """
         try:
-            from ...web import run_server
+            from ...api import create_api_app
         except ImportError as e:
-            console.print(f"[red]Web GUI 依赖未安装: {e}[/red]")
-            console.print("[dim]请运行: pip install fastapi uvicorn[/dim]")
+            console.print(f"[red]API 依赖未安装: {e}[/red]")
+            console.print("[dim]请运行: pip install yaelocus[web][/dim]")
             raise typer.Exit(1)
 
-        console.print(f"[bold blue]YaeLocus[/bold blue] [dim]v{__version__}[/dim]")
-        if no_gui:
-            console.print(f"[dim]API 服务器: http://{host}:{port}[/dim]")
-            console.print("[dim]按 Ctrl+C 停止[/dim]")
-            run_server(host=host, port=port, open_browser=False)
-        else:
-            console.print(f"[dim]旧版 Web GUI: http://{host}:{port}[/dim]")
-            console.print("[dim]按 Ctrl+C 停止[/dim]")
-            run_server(host=host, port=port, open_browser=True)
+        # 注册信号处理器（Windows 只支持 SIGINT）
+        signal.signal(signal.SIGINT, _signal_handler)
+
+        # 检测端口可用性
+        actual_port = _find_available_port(host, port)
+        if actual_port != port:
+            console.print(f"[yellow]端口 {port} 已被占用，切换到端口 {actual_port}[/yellow]")
+
+        # 写入端口文件
+        try:
+            _PORT_FILE.write_text(json.dumps({"port": actual_port, "host": host}))
+        except Exception:
+            pass
+
+        console.print(f"[bold cyan]YaeLocus[/bold cyan] [dim]v{__version__}[/dim]")
+        console.print(f"[dim]API 服务器:[/dim] [bold]http://{host}:{actual_port}[/bold]")
+        console.print("[dim]按 Ctrl+C 停止[/dim]")
+        console.print()
+
+        import uvicorn
+        import threading
+        import webbrowser
+
+        if not no_gui:
+            threading.Timer(0.8, lambda: webbrowser.open(f"http://{host}:{actual_port}")).start()
+
+        app = create_api_app()
+        try:
+            uvicorn.run(app, host=host, port=actual_port, log_level="warning")
+        finally:
+            _cleanup_port_file()
 
     @app.command("gui")
     def gui_command(
@@ -150,9 +222,23 @@ def register_serve(app: typer.Typer):
             console.print("[dim]请运行: pip install fastapi uvicorn[/dim]")
             raise typer.Exit(1)
 
+        # 注册信号处理器（Windows 只支持 SIGINT）
+        signal.signal(signal.SIGINT, _signal_handler)
+
+        # 检测端口可用性
+        actual_port = _find_available_port(host, port)
+        if actual_port != port:
+            console.print(f"[yellow]端口 {port} 已被占用，切换到端口 {actual_port}[/yellow]")
+
+        # 写入端口文件
+        try:
+            _PORT_FILE.write_text(json.dumps({"port": actual_port, "host": host}))
+        except Exception:
+            pass
+
         console.print()
         console.print(f"[bold cyan]YaeLocus[/bold cyan] [dim]v{__version__}[/dim]")
-        console.print(f"[dim]新版 Web GUI:[/dim] [bold]http://{host}:{port}[/bold]")
+        console.print(f"[dim]新版 Web GUI:[/dim] [bold]http://{host}:{actual_port}[/bold]")
         console.print("[dim]按 Ctrl+C 停止[/dim]")
         console.print()
 
@@ -161,7 +247,10 @@ def register_serve(app: typer.Typer):
         import webbrowser
 
         if not no_open:
-            threading.Timer(0.8, lambda: webbrowser.open(f"http://{host}:{port}")).start()
+            threading.Timer(0.8, lambda: webbrowser.open(f"http://{host}:{actual_port}")).start()
 
         app = create_api_app()
-        uvicorn.run(app, host=host, port=port, log_level="warning")
+        try:
+            uvicorn.run(app, host=host, port=actual_port, log_level="warning")
+        finally:
+            _cleanup_port_file()

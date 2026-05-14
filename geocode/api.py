@@ -38,28 +38,157 @@ from .cli.utils import resolve_path
 
 _cache: Optional[CacheManager] = None
 _logger: Optional[APILogger] = None
+
+import datetime as _dt
+
+
+def _server_log(msg: str, level: str = "INFO") -> None:
+    """向启动 yaolocus gui/serve 的终端输出关键日志（stderr 实时刷新）。"""
+    ts = _dt.datetime.now().strftime("%H:%M:%S")
+    tag = {"INFO": "●", "WARN": "▲", "ERROR": "✗"}.get(level, "●")
+    print(f"[{ts}] {tag} {msg}", file=sys.stderr, flush=True)
 _geocoder: Optional[Geocoder] = None
 _ai_client: Optional[AIClient] = None
 
-# 后台任务追踪
+# 后台任务追踪（内存字典，仅用于运行中任务）
 _tasks: dict = {}
 _tasks_lock = threading.Lock()
 _cleanup_started = False
 
+# SQLite 任务历史数据库路径
+_TASK_DB_PATH: Optional[Path] = None
 
-def _persist_task(task_id: str, task_data: dict) -> None:
-    """将已完成任务写入 JSON 文件，服务器重启后可恢复"""
+
+def _get_task_db_path() -> Path:
+    """获取任务历史数据库路径"""
+    global _TASK_DB_PATH
+    if _TASK_DB_PATH is None:
+        _TASK_DB_PATH = OutputPaths.DATABASE / "geocache.db"
+        _TASK_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    return _TASK_DB_PATH
+
+
+def _init_task_history_table() -> None:
+    """初始化任务历史表"""
+    db_path = _get_task_db_path()
     try:
-        progress_dir = OutputPaths.PROGRESS
-        progress_dir.mkdir(parents=True, exist_ok=True)
-        task_file = progress_dir / f"{task_id}.json"
-        task_file.write_text(json.dumps(task_data, ensure_ascii=False, default=str), encoding="utf-8")
+        import sqlite3
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS task_history (
+                task_id TEXT PRIMARY KEY,
+                status TEXT NOT NULL,
+                input_file TEXT NOT NULL,
+                column TEXT NOT NULL,
+                city TEXT,
+                total INTEGER NOT NULL DEFAULT 0,
+                success INTEGER NOT NULL DEFAULT 0,
+                failed INTEGER NOT NULL DEFAULT 0,
+                csv_output TEXT,
+                map_output TEXT,
+                started_at REAL NOT NULL,
+                completed_at REAL,
+                error TEXT
+            )
+        """)
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass  # 初始化失败不影响主流程
+
+
+def _save_task_to_db(task_data: dict) -> None:
+    """将任务记录保存到 SQLite"""
+    db_path = _get_task_db_path()
+    try:
+        import sqlite3
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("""
+            INSERT OR REPLACE INTO task_history (
+                task_id, status, input_file, column, city,
+                total, success, failed, csv_output, map_output,
+                started_at, completed_at, error
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            task_data.get("task_id"),
+            task_data.get("status"),
+            task_data.get("input_file", ""),
+            task_data.get("column", "地址"),
+            task_data.get("city"),
+            task_data.get("total", 0),
+            task_data.get("success", 0),
+            task_data.get("failed", 0),
+            task_data.get("csv_output"),
+            task_data.get("map_output"),
+            task_data.get("started_at", time.time()),
+            task_data.get("completed_at"),
+            task_data.get("error"),
+        ))
+        conn.commit()
+        conn.close()
     except Exception:
         pass  # 持久化失败不影响主流程
 
 
+def _get_all_tasks_from_db() -> list:
+    """从 SQLite 获取所有任务记录"""
+    db_path = _get_task_db_path()
+    try:
+        import sqlite3
+        conn = sqlite3.connect(str(db_path))
+        cursor = conn.execute("""
+            SELECT task_id, status, input_file, column, city,
+                   total, success, failed, csv_output, map_output,
+                   started_at, completed_at, error
+            FROM task_history
+            ORDER BY started_at DESC
+        """)
+        tasks = []
+        for row in cursor.fetchall():
+            tasks.append({
+                "task_id": row[0],
+                "status": row[1],
+                "input_file": row[2],
+                "column": row[3],
+                "city": row[4],
+                "total": row[5],
+                "success": row[6],
+                "failed": row[7],
+                "csv_output": row[8],
+                "map_output": row[9],
+                "started_at": row[10],
+                "completed_at": row[11],
+                "error": row[12],
+            })
+        conn.close()
+        return tasks
+    except Exception:
+        return []
+
+
+def _delete_task_from_db(task_id: str) -> bool:
+    """从 SQLite 删除任务记录"""
+    db_path = _get_task_db_path()
+    try:
+        import sqlite3
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("DELETE FROM task_history WHERE task_id = ?", (task_id,))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception:
+        return False
+
+
+def _persist_task(task_id: str, task_data: dict) -> None:
+    """将已完成任务写入 SQLite（弃用 JSON 文件方案）"""
+    # 添加 task_id 到数据中
+    task_data["task_id"] = task_id
+    _save_task_to_db(task_data)
+
+
 def _start_task_cleanup() -> None:
-    """启动后台清理线程，定期清理过期任务（超过 1 小时）"""
+    """启动后台清理线程，定期清理过期任务（超过 30 天）"""
     global _cleanup_started
     if _cleanup_started:
         return
@@ -69,13 +198,15 @@ def _start_task_cleanup() -> None:
         while True:
             time.sleep(600)  # 每 10 分钟
             try:
-                progress_dir = OutputPaths.PROGRESS
-                if not progress_dir.exists():
-                    continue
-                cutoff = time.time() - 3600
-                for f in progress_dir.glob("*.json"):
-                    if f.stat().st_mtime < cutoff:
-                        f.unlink()
+                db_path = _get_task_db_path()
+                cutoff = time.time() - 30 * 24 * 3600  # 30 天
+                import sqlite3
+                conn = sqlite3.connect(str(db_path))
+                conn.execute("DELETE FROM task_history WHERE completed_at < ? AND status IN ('done', 'error')", (cutoff,))
+                conn.commit()
+                conn.close()
+
+                # 同时清理内存中的过期任务
                 with _tasks_lock:
                     stale = [tid for tid, t in _tasks.items()
                              if t.get("status") in ("done", "error")
@@ -146,6 +277,56 @@ def create_api_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    # 初始化任务历史表
+    _init_task_history_table()
+
+    # ── 任务历史端点 ──────────────────────────────────────────────────
+
+    @app.get("/api/tasks")
+    async def get_all_tasks():
+        """获取所有已完成任务列表"""
+        tasks = _get_all_tasks_from_db()
+        return {"tasks": tasks, "count": len(tasks)}
+
+    @app.get("/api/tasks/{task_id}")
+    async def get_task_detail(task_id: str):
+        """获取单个任务详情（含结果数据）"""
+        tasks = _get_all_tasks_from_db()
+        task = next((t for t in tasks if t["task_id"] == task_id), None)
+        if not task:
+            # 尝试从内存中查找运行中的任务
+            with _tasks_lock:
+                task = _tasks.get(task_id)
+            if task:
+                task["task_id"] = task_id
+            else:
+                raise HTTPException(404, f"任务 '{task_id}' 不存在")
+
+        # 尝试加载结果 JSON
+        results_json_path = OutputPaths.PROGRESS / f"{task_id}_results.json"
+        if results_json_path.exists():
+            try:
+                import json as _json_local
+                task["results"] = _json_local.loads(results_json_path.read_text(encoding="utf-8"))
+            except Exception:
+                task["results"] = []
+        else:
+            task["results"] = []
+
+        return task
+
+    @app.delete("/api/tasks/{task_id}")
+    async def delete_task(task_id: str):
+        """删除任务记录"""
+        success = _delete_task_from_db(task_id)
+        if not success:
+            raise HTTPException(500, "删除任务失败")
+        # 同时从内存中删除
+        with _tasks_lock:
+            if task_id in _tasks:
+                del _tasks[task_id]
+        return {"success": True, "message": f"任务 '{task_id}' 已删除"}
 
     # ── 健康检查 ──────────────────────────────────────────────────
 
@@ -413,6 +594,7 @@ def create_api_app() -> FastAPI:
         def _run_batch():
             try:
                 import pandas as pd
+                _server_log(f"批量编码开始 — 文件: {input_path.name}")
                 geocoder = _get_geocoder()
                 path_str = str(input_path)
 
@@ -445,20 +627,23 @@ def create_api_app() -> FastAPI:
                 create_map(results, str(map_path))
 
                 with _tasks_lock:
+                    success_n = sum(1 for r in results if r.get("success"))
                     _tasks[task_id] = {
                         "status": "done",
                         "progress": 100,
                         "total": total,
-                        "success": sum(1 for r in results if r.get("success")),
+                        "success": success_n,
                         "csv": str(csv_path),
                         "map": str(map_path),
                         "_completed_at": time.time(),
                     }
                 _persist_task(task_id, _tasks[task_id])
+                _server_log(f"批量编码完成 — {success_n}/{total} 成功, 地图: {map_path.name}")
             except Exception as e:
                 with _tasks_lock:
                     _tasks[task_id] = {"status": "error", "error": str(e), "_completed_at": time.time()}
                 _persist_task(task_id, _tasks[task_id])
+                _server_log(f"批量编码失败 — {e}", "ERROR")
 
         threading.Thread(target=_run_batch, daemon=True).start()
         return {"task_id": task_id, "status": "running"}
@@ -476,18 +661,25 @@ def create_api_app() -> FastAPI:
         file: UploadFile = File(...),
         column: str = Form("地址"),
         workers: str = Form("auto"),
+        city: Optional[str] = Form(None),
     ):
         """批量地理编码 — SSE 进度流（多步骤可视化）"""
         if not file.filename:
             raise HTTPException(400, "未选择文件")
 
         content = await file.read()
+        filename = file.filename or "uploaded"
 
         async def generate_progress():
+            # 生成 task_id 并第一时间推送
+            task_id = str(uuid.uuid4())[:8]
+            started_at = time.time()
+            yield f"data: {json.dumps({'task_id': task_id}, ensure_ascii=False)}\n\n"
+
             try:
                 import pandas as pd
+                _server_log(f"SSE 批量编码开始 — 文件: {filename}")
                 geocoder = _get_geocoder()
-                filename = file.filename or "uploaded"
 
                 # 步骤 1: 读取文件
                 yield f"data: {json.dumps({'step': 'reading', 'label': '读取文件', 'status': 'running'}, ensure_ascii=False)}\n\n"
@@ -506,15 +698,60 @@ def create_api_app() -> FastAPI:
                 if column not in df.columns:
                     error_msg = f"列 '{column}' 不存在，可用列: {list(df.columns)}"
                     yield f"data: {json.dumps({'error': error_msg, 'step': 'processing'}, ensure_ascii=False)}\n\n"
+                    # 记录失败任务
+                    _save_task_to_db({
+                        "task_id": task_id,
+                        "status": "error",
+                        "input_file": filename,
+                        "column": column,
+                        "city": city,
+                        "total": 0,
+                        "success": 0,
+                        "failed": 0,
+                        "started_at": started_at,
+                        "completed_at": time.time(),
+                        "error": error_msg,
+                    })
                     return
 
                 addresses = df[column].dropna().astype(str).tolist()
                 if len(addresses) == 0:
                     yield f"data: {json.dumps({'error': '未找到有效地址', 'step': 'processing'}, ensure_ascii=False)}\n\n"
+                    # 记录失败任务
+                    _save_task_to_db({
+                        "task_id": task_id,
+                        "status": "error",
+                        "input_file": filename,
+                        "column": column,
+                        "city": city,
+                        "total": 0,
+                        "success": 0,
+                        "failed": 0,
+                        "started_at": started_at,
+                        "completed_at": time.time(),
+                        "error": "未找到有效地址",
+                    })
                     return
 
+                # 指定地市前缀处理
+                if city:
+                    city_normalized = city.strip()
+                    if not city_normalized.endswith("市") and not city_normalized.endswith("区") and not city_normalized.endswith("县"):
+                        city_normalized = city_normalized + "市"
+                    # 检查地址是否包含"市"的信息
+                    # 如果地址没有包含任何"市"关键字，则添加指定地市前缀
+                    addresses_with_city = []
+                    for addr in addresses:
+                        if "市" in addr:
+                            # 地址已包含"市"的信息，不添加前缀
+                            addresses_with_city.append(addr)
+                        else:
+                            # 地址没有包含"市"的信息，添加指定地市前缀
+                            addresses_with_city.append(f"{city_normalized}{addr}")
+                    addresses = addresses_with_city
+
                 total = len(addresses)
-                yield f"data: {json.dumps({'step': 'processing', 'label': '处理地址', 'status': 'running', 'total': total, 'current': 0}, ensure_ascii=False)}\n\n"
+                yield f"data: {json.dumps({'step': 'processing', 'label': '处理地址', 'status': 'running', 'total': total, 'current': 0, 'success': 0}, ensure_ascii=False)}\n\n"
 
                 results = []
                 success_count = 0
@@ -529,19 +766,84 @@ def create_api_app() -> FastAPI:
 
                     if (i + 1) % 10 == 0 or i == total - 1:
                         yield f"data: {json.dumps({'step': 'processing', 'label': '处理地址', 'status': 'running', 'total': total, 'current': i + 1, 'success': success_count}, ensure_ascii=False)}\n\n"
+                        _server_log(f"进度: {i + 1}/{total} ({success_count} 成功)")
 
                 yield f"data: {json.dumps({'step': 'processing', 'label': '处理地址', 'status': 'done', 'total': total, 'success': success_count}, ensure_ascii=False)}\n\n"
 
                 # 步骤 3: 保存结果
                 yield f"data: {json.dumps({'step': 'saving', 'label': '保存结果', 'status': 'running'}, ensure_ascii=False)}\n\n"
 
-                df["longitude"] = [r.get("longitude") if r else None for r in results]
-                df["latitude"] = [r.get("latitude") if r else None for r in results]
-                df["source"] = [r.get("source") if r else None for r in results]
+                # 创建地址到结果的映射（支持地址重复和空地址）
+                address_to_result = {}
+                for addr, result in zip(addresses, results):
+                    addr_key = str(addr).strip()
+                    address_to_result[addr_key] = result
+
+                # 遍历原始 DataFrame，为每行分配对应结果
+                longitude_list = []
+                latitude_list = []
+                source_list = []
+                formatted_address_list = []
+                province_list = []
+                city_list = []
+                district_list = []
+                status_list = []
+
+                for addr in df[column]:
+                    addr_str = str(addr).strip() if pd.notna(addr) else ""
+                    result = address_to_result.get(addr_str)
+                    if result and result.get("success"):
+                        longitude_list.append(result.get("longitude"))
+                        latitude_list.append(result.get("latitude"))
+                        source_list.append(result.get("source"))
+                        formatted_address_list.append(result.get("formatted_address"))
+                        province_list.append(result.get("province"))
+                        city_list.append(result.get("city"))
+                        district_list.append(result.get("district"))
+                        status_list.append("成功")
+                    elif result:
+                        longitude_list.append(None)
+                        latitude_list.append(None)
+                        source_list.append(result.get("source"))
+                        formatted_address_list.append(None)
+                        province_list.append(None)
+                        city_list.append(None)
+                        district_list.append(None)
+                        status_list.append("失败")
+                    else:
+                        longitude_list.append(None)
+                        latitude_list.append(None)
+                        source_list.append(None)
+                        formatted_address_list.append(None)
+                        province_list.append(None)
+                        city_list.append(None)
+                        district_list.append(None)
+                        status_list.append("空地址" if not addr_str else "未处理")
+
+                # 赋值到 DataFrame（长度与原始 df 一致）
+                df["longitude"] = longitude_list
+                df["latitude"] = latitude_list
+                df["source"] = source_list
+                df["formatted_address"] = formatted_address_list
+                df["province"] = province_list
+                df["city"] = city_list
+                df["district"] = district_list
+                df["status"] = status_list
 
                 stem = Path(filename).stem
                 csv_path = OutputPaths.CSV / f"{stem}.csv"
                 df.to_csv(csv_path, index=False, encoding="utf-8-sig")
+
+                # 保存结果 JSON（供任务明细查询）
+                results_json_path = OutputPaths.PROGRESS / f"{task_id}_results.json"
+                try:
+                    import json as _json_local
+                    results_json_path.write_text(
+                        _json_local.dumps(results, ensure_ascii=False, default=str),
+                        encoding="utf-8"
+                    )
+                except Exception:
+                    pass
 
                 from .map_visualizer import create_map
                 valid_results = [r for r in results if r.get("success")]
@@ -549,10 +851,44 @@ def create_api_app() -> FastAPI:
                 if valid_results:
                     create_map(valid_results, str(map_path))
 
+                # 保存任务记录到 SQLite
+                completed_at = time.time()
+                _save_task_to_db({
+                    "task_id": task_id,
+                    "status": "done",
+                    "input_file": filename,
+                    "column": column,
+                    "city": city,
+                    "total": total,
+                    "success": success_count,
+                    "failed": total - success_count,
+                    "csv_output": str(csv_path),
+                    "map_output": str(map_path) if valid_results else None,
+                    "started_at": started_at,
+                    "completed_at": completed_at,
+                    "error": None,
+                })
+
                 yield f"data: {json.dumps({'step': 'saving', 'label': '保存结果', 'status': 'done', 'csv': str(csv_path), 'map': str(map_path)}, ensure_ascii=False)}\n\n"
+                _server_log(f"SSE 批量编码完成 — {success_count}/{total} 成功, 耗时 {completed_at - started_at:.1f}s")
                 yield "data: [DONE]\n\n"
 
             except Exception as e:
+                _server_log(f"SSE 批量编码失败 — {e}", "ERROR")
+                # 记录失败任务
+                _save_task_to_db({
+                    "task_id": task_id,
+                    "status": "error",
+                    "input_file": filename,
+                    "column": column,
+                    "city": city,
+                    "total": 0,
+                    "success": 0,
+                    "failed": 0,
+                    "started_at": started_at,
+                    "completed_at": time.time(),
+                    "error": str(e),
+                })
                 yield f"data: {json.dumps({'error': str(e)}, ensure_ascii=False)}\n\n"
 
         return StreamingResponse(

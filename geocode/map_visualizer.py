@@ -465,8 +465,10 @@ function setupPopupListener() {
 function updatePopupButtons() {
     var twoPointBtns = document.querySelectorAll('.two-point-btn');
     var routeBtns = document.querySelectorAll('.route-btn');
+    var denseBtns = document.querySelectorAll('.dense-btn');
     twoPointBtns.forEach(btn => btn.style.display = currentMode === 'two-point' ? 'inline-block' : 'none');
     routeBtns.forEach(btn => btn.style.display = currentMode === 'route' ? 'inline-block' : 'none');
+    denseBtns.forEach(btn => btn.style.display = denseState.enabled ? 'inline-block' : 'none');
 }
 
 function escapeHtml(text) {
@@ -715,55 +717,618 @@ function collapseDistancePanel() {
         btn.style.display = 'flex';
     }
 }
+
+// ========== 密集搜索模式 ==========
+
+// 全局标记数据（由 Python 注入）
+var _denseMarkerData = [];
+
+var denseState = {
+    enabled: false,
+    center: null,
+    previousCenter: null,
+    radius: 5,
+    recommendations: [],
+    highlightMarkers: [],
+    routes: [],
+    visitHistory: [],
+    searchCircle: null
+};
+
+function toggleDenseMode() {
+    denseState.enabled = !denseState.enabled;
+    var btn = document.getElementById('dense-toggle-btn');
+    var body = document.getElementById('dense-panel-body');
+    if (denseState.enabled) {
+        if (btn) btn.classList.add('active');
+        if (body) body.style.display = 'block';
+        updatePopupButtons();
+        // 首次开启时收集标记引用
+        if (!window._markersCollected) { _collectAllMarkers(); }
+    } else {
+        clearDenseMode();
+        if (btn) btn.classList.remove('active');
+        if (body) body.style.display = 'none';
+        updatePopupButtons();
+        // 恢复所有标记为完全可见
+        _restoreAllMarkers();
+    }
+}
+
+function selectDenseCenter(idx) {
+    if (idx < 0 || idx >= _denseMarkerData.length) return;
+    var data = _denseMarkerData[idx];
+    // 保存当前圆心为 previousCenter（用于排除）
+    if (denseState.center) {
+        denseState.previousCenter = {
+            idx: denseState.center.idx,
+            address: denseState.center.address
+        };
+    }
+    denseState.center = {
+        idx: idx,
+        gcjLat: data.gcjLat,
+        gcjLon: data.gcjLon,
+        wgsLat: data.wgsLat,
+        wgsLon: data.wgsLon,
+        address: data.address
+    };
+    // 加入访问历史
+    denseState.visitHistory.push({
+        idx: idx,
+        address: data.address,
+        gcjLat: data.gcjLat,
+        gcjLon: data.gcjLon
+    });
+    searchNearby();
+}
+
+function searchNearby() {
+    if (!denseState.center) return;
+    var cLat = denseState.center.wgsLat;
+    var cLon = denseState.center.wgsLon;
+    var radius = denseState.radius;
+    var map = getMap();
+
+    // 更新/绘制搜索半径圆（虚线半透明，不阻挡交互）
+    if (map) {
+        if (denseState.searchCircle) {
+            try { map.removeLayer(denseState.searchCircle); } catch(e) {}
+        }
+        denseState.searchCircle = L.circle([denseState.center.gcjLat, denseState.center.gcjLon], {
+            radius: radius * 1000,
+            color: '#4a90d9', fillColor: '#4a90d9',
+            fillOpacity: 0.05, weight: 1.5, dashArray: '6 4',
+            interactive: false
+        }).addTo(map);
+    }
+
+    // 标记过滤：圆外标记淡化
+    _filterMarkersByRadius(denseState.center.wgsLat, denseState.center.wgsLon, radius);
+
+    // 按地址分组统计：{ address: { count, minDist, bestIdx, gcjLat, gcjLon, wgsLat, wgsLon } }
+    var groups = {};
+    for (var i = 0; i < _denseMarkerData.length; i++) {
+        var m = _denseMarkerData[i];
+        var dist = haversineDistance(cLat, cLon, m.wgsLat, m.wgsLon);
+        if (dist > radius) continue;
+        // 排除当前圆心自身
+        if (m.idx === denseState.center.idx) continue;
+        // 排除上一个圆心
+        if (denseState.previousCenter && m.idx === denseState.previousCenter.idx) continue;
+
+        var addr = m.address;
+        if (!groups[addr]) {
+            groups[addr] = { address: addr, count: 0, minDist: Infinity, bestIdx: i,
+                             gcjLat: m.gcjLat, gcjLon: m.gcjLon, wgsLat: m.wgsLat, wgsLon: m.wgsLon };
+        }
+        groups[addr].count++;
+        if (dist < groups[addr].minDist) {
+            groups[addr].minDist = dist;
+            groups[addr].bestIdx = i;
+            groups[addr].gcjLat = m.gcjLat;
+            groups[addr].gcjLon = m.gcjLon;
+            groups[addr].wgsLat = m.wgsLat;
+            groups[addr].wgsLon = m.wgsLon;
+        }
+    }
+
+    // 转为数组并按规则排序：频次降序 → 距离升序
+    var sorted = [];
+    for (var key in groups) {
+        if (groups.hasOwnProperty(key)) sorted.push(groups[key]);
+    }
+    sorted.sort(function(a, b) {
+        if (b.count !== a.count) return b.count - a.count;
+        return a.minDist - b.minDist;
+    });
+
+    denseState.recommendations = sorted.slice(0, 5);
+
+    // 清除旧的高亮标记
+    clearHighlightMarkers();
+
+    // 绘制新的高亮标记
+    if (map) {
+        // 圆心标记（红色大圆 + 标签）
+        if (denseState.center) {
+            denseState.highlightMarkers.push(
+                L.circleMarker([denseState.center.gcjLat, denseState.center.gcjLon], {
+                    radius: 14, color: '#e74c3c', fillColor: '#e74c3c', fillOpacity: 0.85, weight: 3
+                }).addTo(map)
+            );
+            denseState.highlightMarkers.push(
+                L.marker([denseState.center.gcjLat, denseState.center.gcjLon], {
+                    icon: L.divIcon({
+                        className: 'dense-center-label',
+                        html: '<div style="background:#fff;color:#e74c3c;font-weight:bold;font-size:12px;width:28px;height:28px;line-height:28px;text-align:center;border-radius:50%;border:3px solid #e74c3c;box-shadow:0 2px 6px rgba(0,0,0,0.3);">&#9679;</div>',
+                        iconSize: [28, 28], iconAnchor: [14, 14]
+                    })
+                }).addTo(map)
+            );
+        }
+        // 推荐标记（橙色脉冲圆 + 序号标签）
+        for (var r = 0; r < denseState.recommendations.length; r++) {
+            var rec = denseState.recommendations[r];
+            (function(rec, rank) {
+                denseState.highlightMarkers.push(
+                    L.circleMarker([rec.gcjLat, rec.gcjLon], {
+                        radius: 12, color: '#ff6600', fillColor: '#ff6600', fillOpacity: 0.75, weight: 3,
+                        className: 'dense-rec-pulse'
+                    }).addTo(map).bindTooltip((rank+1) + '. ' + rec.address.substring(0, 20) + ' (' + rec.count + '次, ' + rec.minDist.toFixed(1) + 'km)')
+                );
+                denseState.highlightMarkers.push(
+                    L.marker([rec.gcjLat, rec.gcjLon], {
+                        icon: L.divIcon({
+                            className: 'dense-rec-label',
+                            html: '<div style="background:#fff;color:#ff6600;font-weight:bold;font-size:13px;width:26px;height:26px;line-height:26px;text-align:center;border-radius:50%;border:2px solid #ff6600;box-shadow:0 2px 6px rgba(0,0,0,0.3);">' + (rank+1) + '</div>',
+                            iconSize: [26, 26], iconAnchor: [13, 13]
+                        })
+                    }).addTo(map)
+                );
+            })(rec, r);
+        }
+        // 自适应视野
+        if (denseState.recommendations.length > 0) {
+            var bounds = [[denseState.center.gcjLat, denseState.center.gcjLon]];
+            for (var r2 = 0; r2 < denseState.recommendations.length; r2++) {
+                bounds.push([denseState.recommendations[r2].gcjLat, denseState.recommendations[r2].gcjLon]);
+            }
+            try { map.fitBounds(bounds, { padding: [40, 40], maxZoom: 15 }); } catch(e) {}
+        }
+    }
+
+    // 同步半径输入框的值
+    var radiusInput = document.getElementById('dense-radius-input');
+    if (radiusInput && parseFloat(radiusInput.value) !== radius) {
+        radiusInput.value = radius;
+    }
+
+    updateDensePanelUI();
+}
+
+function selectRecommendation(recIdx) {
+    if (recIdx < 0 || recIdx >= denseState.recommendations.length) return;
+    var rec = denseState.recommendations[recIdx];
+    // 绘制路线 A → B
+    if (denseState.center) {
+        drawDenseRoute(
+            { gcjLat: denseState.center.gcjLat, gcjLon: denseState.center.gcjLon, address: denseState.center.address },
+            { gcjLat: rec.gcjLat, gcjLon: rec.gcjLon, address: rec.address }
+        );
+    }
+    // 将推荐点设为新圆心（通过 idx 查找）
+    var newIdx = rec.bestIdx;
+    if (newIdx >= 0 && newIdx < _denseMarkerData.length) {
+        selectDenseCenter(newIdx);
+    }
+}
+
+function drawDenseRoute(from, to) {
+    var map = getMap();
+    if (!map) return;
+    var colors = ['#2ecc71', '#2196F3', '#4CAF50', '#9C27B0', '#FF9800', '#00BCD4', '#795548', '#607D8B'];
+    var color = colors[denseState.routes.length % colors.length];
+    var line = L.polyline([[from.gcjLat, from.gcjLon], [to.gcjLat, to.gcjLon]], {
+        color: color, weight: 4, opacity: 0.8, dashArray: null
+    }).addTo(map);
+    // 绑定点击查看详情
+    var dist = haversineDistance(
+        _denseMarkerData[denseState.center.idx].wgsLat, _denseMarkerData[denseState.center.idx].wgsLon,
+        _denseMarkerData[denseState.recommendations[0] ? denseState.recommendations[0].bestIdx : 0].wgsLat,
+        _denseMarkerData[denseState.recommendations[0] ? denseState.recommendations[0].bestIdx : 0].wgsLon
+    );
+    line.bindTooltip(from.address.substring(0, 10) + ' → ' + to.address.substring(0, 10));
+    denseState.routes.push({ line: line, from: from.address, to: to.address, color: color });
+}
+
+function clearHighlightMarkers() {
+    var map = getMap();
+    if (map) {
+        for (var i = 0; i < denseState.highlightMarkers.length; i++) {
+            try { map.removeLayer(denseState.highlightMarkers[i]); } catch(e) {}
+        }
+        if (denseState.searchCircle) {
+            try { map.removeLayer(denseState.searchCircle); } catch(e) {}
+            denseState.searchCircle = null;
+        }
+    }
+    denseState.highlightMarkers = [];
+}
+
+function clearDenseRoutes() {
+    var map = getMap();
+    if (map) {
+        for (var i = 0; i < denseState.routes.length; i++) {
+            try { map.removeLayer(denseState.routes[i].line); } catch(e) {}
+        }
+    }
+    denseState.routes = [];
+}
+
+function clearDenseMode() {
+    clearHighlightMarkers();
+    clearDenseRoutes();
+    _restoreAllMarkers();
+    denseState.center = null;
+    denseState.previousCenter = null;
+    denseState.recommendations = [];
+    denseState.visitHistory = [];
+    updateDensePanelUI();
+}
+
+// ========== 标记收集与过滤 ==========
+
+function _collectAllMarkers() {
+    var map = getMap();
+    if (!map) return;
+    // 递归遍历所有 layer，收集 L.Marker 实例
+    function walk(layer) {
+        if (layer instanceof L.Marker) {
+            var ll = layer.getLatLng();
+            // 按 GCJ-02 坐标匹配 _denseMarkerData（允许微小误差）
+            for (var i = 0; i < _denseMarkerData.length; i++) {
+                var d = _denseMarkerData[i];
+                if (Math.abs(ll.lat - d.gcjLat) < 0.00001 && Math.abs(ll.lng - d.gcjLon) < 0.00001) {
+                    if (!_denseMarkerData[i]._layer) {
+                        _denseMarkerData[i]._layer = layer;
+                    }
+                    break;
+                }
+            }
+        }
+        if (layer.eachLayer) {
+            layer.eachLayer(function(child) { walk(child); });
+        }
+    }
+    map.eachLayer(walk);
+    window._markersCollected = true;
+}
+
+function _filterMarkersByRadius(cLat, cLon, radius) {
+    // 如果标记引用尚未收集，先收集
+    if (!window._markersCollected) _collectAllMarkers();
+    for (var i = 0; i < _denseMarkerData.length; i++) {
+        var m = _denseMarkerData[i];
+        if (!m._layer) continue;
+        var dist = haversineDistance(cLat, cLon, m.wgsLat, m.wgsLon);
+        try {
+            if (dist <= radius) {
+                m._layer.setOpacity(1.0);
+            } else {
+                m._layer.setOpacity(0.06);
+            }
+        } catch(e) {}
+    }
+}
+
+function _restoreAllMarkers() {
+    for (var i = 0; i < _denseMarkerData.length; i++) {
+        var m = _denseMarkerData[i];
+        if (m._layer) {
+            try { m._layer.setOpacity(1.0); } catch(e) {}
+        }
+    }
+}
+
+function updateDensePanelUI() {
+    // 圆心信息
+    var infoEl = document.getElementById('dense-center-info');
+    if (infoEl) {
+        if (denseState.center) {
+            infoEl.innerHTML = '<strong>圆心:</strong> ' + escapeHtml(denseState.center.address.substring(0, 30)) +
+                               '<br><span style="font-size:11px;color:#999;">半径 ' + denseState.radius.toFixed(1) + ' km 内搜索</span>';
+        } else {
+            infoEl.innerHTML = '请点击地图标记点，在弹出窗口中点击<strong>"选为圆心"</strong>';
+        }
+    }
+
+    // 推荐列表
+    var recList = document.getElementById('dense-rec-list');
+    if (recList) {
+        if (denseState.recommendations.length === 0) {
+            recList.innerHTML = denseState.center ? '<span style="color:#999;">该范围内暂无其他地址</span>' : '<span style="color:#999;">等待选择圆心...</span>';
+        } else {
+            var html = '';
+            for (var i = 0; i < denseState.recommendations.length; i++) {
+                var r = denseState.recommendations[i];
+                html += '<div onclick="selectRecommendation(' + i + ')" style="padding:8px 10px;margin:4px 0;background:#fff;border:1px solid #e8e8e8;border-radius:8px;cursor:pointer;transition:all 0.15s;display:flex;justify-content:space-between;align-items:center;box-shadow:0 1px 2px rgba(0,0,0,0.03);" onmouseover="this.style.background=\\'#fff8f0\\';this.style.borderColor=\\'#ff9800\\';this.style.boxShadow=\\'0 2px 8px rgba(255,152,0,0.12)\\';this.style.transform=\\'translateX(2px)\\'" onmouseout="this.style.background=\\'#fff\\';this.style.borderColor=\\'#e8e8e8\\';this.style.boxShadow=\\'0 1px 2px rgba(0,0,0,0.03)\\';this.style.transform=\\'translateX(0)\\'">' +
+                        '<span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:flex;align-items:center;gap:6px;"><span style="display:inline-flex;align-items:center;justify-content:center;min-width:20px;height:20px;background:#fff3e0;color:#ff6600;font-weight:bold;font-size:11px;border-radius:5px;">' + (i+1) + '</span> ' + escapeHtml(r.address.substring(0, 16)) + '</span>' +
+                        '<span style="font-size:10px;color:#999;margin-left:8px;white-space:nowrap;text-align:right;"><span style="font-weight:600;color:#666;">' + r.count + '</span>次<br><span style="font-size:9px;">' + r.minDist.toFixed(1) + 'km</span></span>' +
+                        '</div>';
+            }
+            recList.innerHTML = html;
+        }
+    }
+
+    // 路径历史
+    var histList = document.getElementById('dense-history-list');
+    if (histList) {
+        if (denseState.visitHistory.length === 0) {
+            histList.innerHTML = '<span style="color:#999;">暂无</span>';
+        } else {
+            var histHtml = '';
+            for (var h = 0; h < denseState.visitHistory.length; h++) {
+                var v = denseState.visitHistory[h];
+                var arrow = h > 0 ? '<span style="color:#4a90d9;margin:0 4px;">→</span>' : '';
+                histHtml += arrow + '<span style="color:#333;">' + escapeHtml(v.address.substring(0, 12)) + '</span>';
+            }
+            // 路线数量
+            histHtml += '<br><span style="font-size:10px;color:#999;">共 ' + denseState.routes.length + ' 段路径</span>';
+            histList.innerHTML = histHtml;
+        }
+    }
+}
+
+function updateRadiusFromInput(val) {
+    var r = parseFloat(val);
+    if (isNaN(r) || r < 0.5) r = 0.5;
+    if (r > 50) r = 50;
+    denseState.radius = r;
+    var input = document.getElementById('dense-radius-input');
+    if (input && parseFloat(input.value) !== r) input.value = r;
+    if (denseState.center) {
+        searchNearby();
+    }
+}
+
+function adjustRadius(delta) {
+    var newVal = denseState.radius + delta;
+    if (newVal < 0.5) newVal = 0.5;
+    if (newVal > 50) newVal = 50;
+    newVal = Math.round(newVal * 2) / 2; // 保留 0.5 步长
+    denseState.radius = newVal;
+    var input = document.getElementById('dense-radius-input');
+    if (input) input.value = newVal;
+    if (denseState.center) {
+        searchNearby();
+    }
+}
+
+// ========== 地图搜索栏 ==========
+
+var _searchHighlight = null;  // 搜索高亮的临时圆形
+
+function onSearchFocus() {
+    var input = document.getElementById('map-search-input');
+    if (input && input.value.length >= 1) {
+        filterSuggestions(input.value);
+    }
+}
+
+function onSearchInput() {
+    var input = document.getElementById('map-search-input');
+    var clearBtn = document.getElementById('map-search-clear');
+    var query = input ? input.value.trim() : '';
+    // 控制清除按钮
+    if (clearBtn) clearBtn.style.display = query.length > 0 ? 'block' : 'none';
+    if (query.length >= 1) {
+        filterSuggestions(query);
+    } else {
+        closeSearchDropdown();
+    }
+}
+
+function onSearchKeydown(e) {
+    if (e.key === 'Escape') { closeSearchDropdown(); return; }
+    if (e.key === 'Enter') {
+        var first = document.querySelector('.search-dropdown-item.active');
+        if (first) first.click();
+    }
+    // 上下箭头导航
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        e.preventDefault();
+        var items = document.querySelectorAll('.search-dropdown-item');
+        if (items.length === 0) return;
+        var active = document.querySelector('.search-dropdown-item.active');
+        var idx = -1;
+        if (active) {
+            for (var i = 0; i < items.length; i++) {
+                if (items[i] === active) { idx = i; break; }
+            }
+            active.classList.remove('active');
+        }
+        if (e.key === 'ArrowDown') idx = (idx + 1) % items.length;
+        else idx = (idx - 1 + items.length) % items.length;
+        items[idx].classList.add('active');
+        items[idx].scrollIntoView({ block: 'nearest' });
+    }
+}
+
+function filterSuggestions(query) {
+    if (!query || query.length < 1) { closeSearchDropdown(); return; }
+    var q = query.toLowerCase();
+    var results = [];
+    var seen = {};  // 去重（相同地址只显示一次）
+    for (var i = 0; i < _denseMarkerData.length; i++) {
+        var m = _denseMarkerData[i];
+        var addr = m.address;
+        if (seen[addr]) continue;
+        // 模糊匹配：查询词中的每个字都必须出现在地址中
+        var matched = true;
+        for (var c = 0; c < q.length; c++) {
+            if (addr.indexOf(q.charAt(c)) === -1 && addr.toLowerCase().indexOf(q.charAt(c)) === -1) {
+                matched = false; break;
+            }
+        }
+        if (matched) {
+            seen[addr] = true;
+            results.push({ idx: i, address: addr, source: m.source, gcjLat: m.gcjLat, gcjLon: m.gcjLon });
+            if (results.length >= 8) break;
+        }
+    }
+    renderSearchDropdown(results);
+}
+
+function renderSearchDropdown(results) {
+    var dropdown = document.getElementById('map-search-dropdown');
+    if (!dropdown) return;
+    if (results.length === 0) {
+        dropdown.innerHTML = '<div style="padding:12px 16px;font-size:13px;color:#999;">无匹配结果</div>';
+        dropdown.style.display = 'block';
+        return;
+    }
+    var sourceNames = { amap: '高德', tianditu: '天地图', baidu: '百度' };
+    var sourceColors = { amap: '#2196F3', tianditu: '#4CAF50', baidu: '#f44336' };
+    var html = '';
+    for (var i = 0; i < results.length; i++) {
+        var r = results[i];
+        var sc = sourceColors[r.source] || '#999';
+        var sn = sourceNames[r.source] || r.source;
+        html += '<div class="search-dropdown-item" onclick="selectSearchResult(' + r.idx + ')" data-idx="' + r.idx + '"' +
+                ' style="padding:10px 14px;cursor:pointer;display:flex;justify-content:space-between;align-items:center;' +
+                'font-size:13px;border-bottom:1px solid #f5f5f5;transition:background 0.1s;"' +
+                ' onmouseover="this.style.background=\\'#f8f9fa\\'" onmouseout="this.style.background=\\'#fff\\'">' +
+                '<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;">' +
+                escapeHtml(r.address) + '</span>' +
+                '<span style="font-size:10px;color:' + sc + ';margin-left:8px;padding:2px 6px;background:' + sc + '15;border-radius:3px;flex-shrink:0;">' + sn + '</span>' +
+                '</div>';
+    }
+    dropdown.innerHTML = html;
+    dropdown.style.display = 'block';
+}
+
+function selectSearchResult(idx) {
+    if (idx < 0 || idx >= _denseMarkerData.length) return;
+    var m = _denseMarkerData[idx];
+    var map = getMap();
+    if (!map) return;
+    // 飞到目标位置
+    map.setView([m.gcjLat, m.gcjLon], Math.max(map.getZoom(), 14), { animate: true });
+    // 清除旧的高亮
+    if (_searchHighlight) {
+        try { map.removeLayer(_searchHighlight); } catch(e) {}
+        _searchHighlight = null;
+    }
+    // 高亮闪烁标记
+    _searchHighlight = L.circleMarker([m.gcjLat, m.gcjLon], {
+        radius: 18, color: '#4a90d9', fillColor: '#4a90d9', fillOpacity: 0.3, weight: 3
+    }).addTo(map);
+    // 3 秒后渐隐
+    setTimeout(function() {
+        if (_searchHighlight) {
+            try { map.removeLayer(_searchHighlight); } catch(e) {}
+            _searchHighlight = null;
+        }
+    }, 3000);
+    // 关闭搜索下拉
+    closeSearchDropdown();
+    // 打开对应标记的 popup
+    setTimeout(function() {
+        // 遍历 marker 找到对应位置并触发 click
+        map.eachLayer(function(layer) {
+            if (layer instanceof L.Marker && !(layer instanceof L.CircleMarker)) {
+                var ll = layer.getLatLng();
+                if (Math.abs(ll.lat - m.gcjLat) < 0.00001 && Math.abs(ll.lng - m.gcjLon) < 0.00001) {
+                    try { layer.openPopup(); } catch(e) {}
+                }
+            }
+        });
+    }, 600);
+}
+
+function closeSearchDropdown() {
+    var dropdown = document.getElementById('map-search-dropdown');
+    if (dropdown) dropdown.style.display = 'none';
+    // 恢复输入框边框
+    var wrapper = document.getElementById('map-search-wrapper');
+    if (wrapper) wrapper.style.borderColor = '#e0e0e0';
+}
+
+function clearSearchInput() {
+    var input = document.getElementById('map-search-input');
+    var clearBtn = document.getElementById('map-search-clear');
+    if (input) input.value = '';
+    if (clearBtn) clearBtn.style.display = 'none';
+    closeSearchDropdown();
+    if (_searchHighlight) {
+        try { getMap().removeLayer(_searchHighlight); } catch(e) {}
+        _searchHighlight = null;
+    }
+}
+
+// 全局点击关闭下拉框
+document.addEventListener('click', function(e) {
+    var bar = document.getElementById('map-search-bar');
+    if (bar && !bar.contains(e.target)) {
+        closeSearchDropdown();
+    }
+});
 </script>
 """
-
-# 共享 JS 文件（提取自 DISTANCE_JS，外部化以减少 HTML 体积）
-_SHARED_JS_FILENAME = "distance.js"
-
-
-def _ensure_shared_js(output_dir: Path) -> Path:
-    """将测距 JS 写入输出目录，多个地图共享一份（始终写入最新版本）"""
-    js_path = output_dir / _SHARED_JS_FILENAME
-    # 提取 <script>...</script> 标签内的纯 JS 代码
-    raw = DISTANCE_JS.strip()
-    if raw.startswith("<script>"):
-        raw = raw[len("<script>"):]
-    if raw.endswith("</script>"):
-        raw = raw[:-len("</script>")]
-    raw = raw.strip()
-    js_path.write_text(raw, encoding="utf-8")
-    return js_path
 
 
 # 测距面板 HTML 模板 - 右下角折叠式浮动按钮 + 展开面板
 DISTANCE_PANEL = """
-<div id="distance-toggle-btn" onclick="toggleDistancePanel()" title="距离测算"
-     style="position: fixed; bottom: 20px; right: 20px; z-index: 9999;
-            width: 44px; height: 44px; border-radius: 50%;
-            background: #4a90d9; color: white; border: none;
-            box-shadow: 0 4px 12px rgba(0,0,0,0.25); cursor: pointer;
-            display: flex; align-items: center; justify-content: center;
-            font-size: 20px; transition: transform 0.2s, box-shadow 0.2s;"
-     onmouseover="this.style.transform='scale(1.1)';this.style.boxShadow='0 6px 16px rgba(0,0,0,0.3)'"
-     onmouseout="this.style.transform='scale(1)';this.style.boxShadow='0 4px 12px rgba(0,0,0,0.25)'">&#128207;</div>
+<style>
+.map-float-btn {
+    position: fixed; right: 20px; z-index: 9999;
+    width: 44px; height: 44px; border-radius: 50%;
+    background: white; color: #666; border: 2px solid #e0e0e0;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.12); cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 19px; transition: all 0.2s; outline: none;
+}
+.map-float-btn:hover {
+    transform: scale(1.08); box-shadow: 0 4px 14px rgba(0,0,0,0.18);
+    border-color: #4a90d9; color: #4a90d9;
+}
+.map-float-btn.active {
+    background: #4a90d9; color: white; border-color: #4a90d9;
+}
+.map-float-btn.active:hover {
+    background: #3d7bc8; border-color: #3d7bc8; color: white;
+}
+.map-panel-close {
+    width: 24px; height: 24px; border-radius: 50%; border: 1px solid #dee2e6;
+    background: #f8f9fa; color: #666; cursor: pointer; font-size: 15px;
+    line-height: 22px; text-align: center; padding: 0; transition: all 0.15s;
+}
+.map-panel-close:hover { background: #e74c3c; color: white; border-color: #e74c3c; }
+#map-search-input:focus { outline: none; }
+#map-search-wrapper:focus-within { border-color: #4a90d9 !important; box-shadow: 0 2px 14px rgba(74,144,217,0.15) !important; }
+.search-dropdown-item.active { background: #f0f7ff !important; }
+.search-dropdown-item:hover { background: #f8f9fa !important; }
+.search-dropdown-item.active:hover { background: #e8f0fb !important; }
+#map-search-dropdown::-webkit-scrollbar { width: 4px; }
+#map-search-dropdown::-webkit-scrollbar-thumb { background: #e0e0e0; border-radius: 2px; }
+</style>
+<div id="distance-toggle-btn" onclick="toggleDistancePanel()" title="距离测算" class="map-float-btn"
+     style="bottom: 20px;">&#128207;</div>
 
-<div id="distance-panel-body" style="position: fixed; bottom: 20px; right: 20px; z-index: 9998; display: none;
-            background-color: white; padding: 12px; border-radius: 8px;
-            box-shadow: 0 4px 16px rgba(0,0,0,0.18); min-width: 220px; max-width: 300px;
+<div id="distance-panel-body" style="position: fixed; bottom: 20px; right: 76px; z-index: 9998; display: none;
+            background-color: white; padding: 14px; border-radius: 10px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.18); min-width: 230px; max-width: 310px;
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;">
-    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
-        <p style="margin: 0; font-weight: bold; font-size: 14px; color: #333;">距离测算</p>
-        <button onclick="collapseDistancePanel()" title="折叠"
-                style="width: 24px; height: 24px; border-radius: 50%; border: 1px solid #dee2e6;
-                       background: #f8f9fa; color: #666; cursor: pointer; font-size: 14px;
-                       line-height: 22px; text-align: center; padding: 0;">&times;</button>
+    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+        <p style="margin: 0; font-weight: 600; font-size: 14px; color: #333;">距离测算</p>
+        <button onclick="collapseDistancePanel()" title="折叠" class="map-panel-close">&times;</button>
     </div>
     <div style="margin-top: 8px; display: flex; gap: 5px;">
         <button id="mode-two-point" onclick="switchMode('two-point')"
-                style="flex: 1; padding: 5px 10px; font-size: 12px; background: #4a90d9; color: white; border: none; border-radius: 4px; cursor: pointer; transition: all 0.2s;">两点测距</button>
+                style="flex: 1; padding: 6px 10px; font-size: 12px; background: #4a90d9; color: white; border: none; border-radius: 5px; cursor: pointer; transition: all 0.2s;">两点测距</button>
         <button id="mode-route" onclick="switchMode('route')"
-                style="flex: 1; padding: 5px 10px; font-size: 12px; background: #f8f9fa; color: #333; border: 1px solid #dee2e6; border-radius: 4px; cursor: pointer; transition: all 0.2s;">多点路径</button>
+                style="flex: 1; padding: 6px 10px; font-size: 12px; background: #f8f9fa; color: #333; border: 1px solid #dee2e6; border-radius: 5px; cursor: pointer; transition: all 0.2s;">多点路径</button>
     </div>
 
     <div id="two-point-panel" style="margin-top: 10px; padding-top: 8px; border-top: 1px solid #eee;">
@@ -778,26 +1343,106 @@ DISTANCE_PANEL = """
                 终点: <span id="end-point" style="color: #e74c3c; margin-left: 4px;">未选择</span>
             </p>
         </div>
-        <div id="distance-result" style="margin-top: 6px; padding: 6px; background: #f8f9fa; border-radius: 4px; font-size: 12px; color: #333;"></div>
-        <button onclick="clearDistance()" style="margin-top: 8px; width: 100%; padding: 6px 12px; font-size: 12px; background: #f8f9fa; color: #333; border: 1px solid #dee2e6; border-radius: 4px; cursor: pointer; transition: all 0.2s;">清除选择</button>
+        <div id="distance-result" style="margin-top: 6px; padding: 6px 8px; background: #f8f9fa; border-radius: 5px; font-size: 12px; color: #333;"></div>
+        <button onclick="clearDistance()" style="margin-top: 8px; width: 100%; padding: 7px 12px; font-size: 12px; background: #f8f9fa; color: #555; border: 1px solid #dee2e6; border-radius: 5px; cursor: pointer; transition: all 0.15s;">清除选择</button>
     </div>
 
     <div id="route-panel" style="display: none; margin-top: 10px; padding-top: 8px; border-top: 1px solid #eee;">
         <div style="display: flex; gap: 4px; margin-bottom: 6px;">
-            <button id="origin-btn" onclick="startSetOrigin()" style="flex: 1; padding: 5px 8px; font-size: 11px; background: #f8f9fa; color: #333; border: 1px solid #dee2e6; border-radius: 4px; cursor: pointer;">设置起点</button>
-            <button onclick="saveRouteData()" style="padding: 5px 8px; font-size: 11px; background: #2ecc71; color: white; border: none; border-radius: 4px; cursor: pointer;">保存</button>
-            <button onclick="loadRouteData()" style="padding: 5px 8px; font-size: 11px; background: #4a90d9; color: white; border: none; border-radius: 4px; cursor: pointer;">加载</button>
+            <button id="origin-btn" onclick="startSetOrigin()" style="flex: 1; padding: 5px 8px; font-size: 11px; background: #f8f9fa; color: #333; border: 1px solid #dee2e6; border-radius: 5px; cursor: pointer;">设置起点</button>
+            <button onclick="saveRouteData()" style="padding: 5px 8px; font-size: 11px; background: #2ecc71; color: white; border: none; border-radius: 5px; cursor: pointer;">保存</button>
+            <button onclick="loadRouteData()" style="padding: 5px 8px; font-size: 11px; background: #4a90d9; color: white; border: none; border-radius: 5px; cursor: pointer;">加载</button>
         </div>
         <div id="origin-info" style="font-size: 11px; margin-bottom: 4px; color: #e74c3c;"></div>
         <p style="margin: 0; font-size: 11px; color: #666;">点击标记点的"记录点"按钮添加</p>
-        <div id="record-list" style="font-size: 11px; max-height: 100px; overflow-y: auto; margin-top: 5px; padding: 4px; background: #f8f9fa; border-radius: 4px;"></div>
+        <div id="record-list" style="font-size: 11px; max-height: 100px; overflow-y: auto; margin-top: 5px; padding: 4px; background: #f8f9fa; border-radius: 5px;"></div>
         <p style="margin: 6px 0 0 0; font-size: 11px; color: #666;">分段距离:</p>
-        <div id="route-segments" style="font-size: 11px; color: #333; max-height: 80px; overflow-y: auto; padding: 4px; background: #f8f9fa; border-radius: 4px;"></div>
-        <div id="route-result" style="margin-top: 6px; padding: 6px; background: #f8f9fa; border-radius: 4px; font-size: 12px; color: #333;"></div>
-        <button onclick="clearRoute()" style="margin-top: 8px; width: 100%; padding: 6px 12px; font-size: 12px; background: #f8f9fa; color: #333; border: 1px solid #dee2e6; border-radius: 4px; cursor: pointer; transition: all 0.2s;">清除路径</button>
+        <div id="route-segments" style="font-size: 11px; color: #333; max-height: 80px; overflow-y: auto; padding: 4px; background: #f8f9fa; border-radius: 5px;"></div>
+        <div id="route-result" style="margin-top: 6px; padding: 6px 8px; background: #f8f9fa; border-radius: 5px; font-size: 12px; color: #333;"></div>
+        <button onclick="clearRoute()" style="margin-top: 8px; width: 100%; padding: 7px 12px; font-size: 12px; background: #f8f9fa; color: #555; border: 1px solid #dee2e6; border-radius: 5px; cursor: pointer; transition: all 0.15s;">清除路径</button>
     </div>
 
     <p style="margin-top: 10px; font-size: 10px; color: #999; border-top: 1px solid #eee; padding-top: 6px;">基于 WGS-84 坐标系计算</p>
+</div>
+"""
+
+
+# 密集搜索面板 HTML 模板 - 右下角浮动按钮 + 展开面板
+DENSE_SEARCH_PANEL = """
+<div id="dense-toggle-btn" onclick="toggleDenseMode()" title="密集搜索模式" class="map-float-btn"
+     style="bottom: 74px; font-size: 18px;">&#128269;</div>
+
+<div id="dense-panel-body" style="position: fixed; bottom: 20px; right: 76px; z-index: 9996; display: none;
+            background-color: white; padding: 14px; border-radius: 10px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.18); width: 280px; max-height: 70vh; overflow-y: auto;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;">
+    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+        <p style="margin: 0; font-weight: 600; font-size: 14px; color: #333;">&#128269; 密集搜索</p>
+        <button onclick="toggleDenseMode()" title="关闭" class="map-panel-close">&times;</button>
+    </div>
+
+    <div id="dense-center-info" style="margin-bottom: 10px; padding: 8px; background: #fff3e0; border-radius: 6px; border-left: 3px solid #ff9800; font-size: 12px; color: #666;">
+        请点击地图标记点，在弹出窗口中点击<strong>"选为圆心"</strong>
+    </div>
+
+    <div style="margin-bottom: 10px;">
+        <label style="font-size: 12px; color: #555; font-weight: 500; display: block; margin-bottom: 5px;">搜索半径</label>
+        <div style="display: flex; align-items: center; gap: 4px;">
+            <button onclick="adjustRadius(-0.5)" title="减小"
+                    style="width: 28px; height: 28px; border: 1px solid #dee2e6; border-radius: 5px;
+                           background: #f8f9fa; color: #555; cursor: pointer; font-size: 16px; line-height: 1;">&minus;</button>
+            <input type="number" id="dense-radius-input" min="0.5" max="50" step="0.5" value="5"
+                   onchange="updateRadiusFromInput(this.value)" onkeydown="if(event.key==='Enter')updateRadiusFromInput(this.value)"
+                   style="width: 80px; padding: 4px 6px; border: 1px solid #dee2e6; border-radius: 5px;
+                          font-size: 13px; text-align: center; color: #333; outline: none;
+                          font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;">
+            <button onclick="adjustRadius(0.5)" title="增大"
+                    style="width: 28px; height: 28px; border: 1px solid #dee2e6; border-radius: 5px;
+                           background: #f8f9fa; color: #555; cursor: pointer; font-size: 16px; line-height: 1;">+</button>
+            <span style="font-size: 12px; color: #999; margin-left: 2px;">km</span>
+        </div>
+    </div>
+
+    <div id="dense-recommendations" style="margin-bottom: 10px;">
+        <p style="margin: 0 0 6px 0; font-size: 12px; color: #555; font-weight: 500;">推荐地址（前5）:</p>
+        <div id="dense-rec-list" style="font-size: 11px; color: #999;">等待选择圆心...</div>
+    </div>
+
+    <div id="dense-history" style="margin-bottom: 10px;">
+        <p style="margin: 0 0 6px 0; font-size: 12px; color: #555; font-weight: 500;">搜索路径:</p>
+        <div id="dense-history-list" style="font-size: 11px; color: #999;">暂无</div>
+    </div>
+
+    <button onclick="clearDenseMode()" style="width: 100%; padding: 8px 12px; font-size: 12px;
+            background: #f8f9fa; color: #e74c3c; border: 1px solid #e74c3c; border-radius: 6px;
+            cursor: pointer; transition: all 0.15s; font-weight: 500;"
+            onmouseover="this.style.background='#e74c3c';this.style.color='white'"
+            onmouseout="this.style.background='#f8f9fa';this.style.color='#e74c3c'">清除全部路径</button>
+</div>
+"""
+# 地图搜索栏 - 顶部居中，带自动补全下拉
+MAP_SEARCH_BAR = """
+<div id="map-search-bar" style="position: fixed; top: 14px; left: 50%; transform: translateX(-50%); z-index: 10000;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;">
+    <div style="position: relative; display: flex; align-items: center;
+                background: white; border-radius: 22px; box-shadow: 0 2px 12px rgba(0,0,0,0.12);
+                border: 2px solid #e0e0e0; transition: border-color 0.2s; width: 340px;"
+         id="map-search-wrapper">
+        <span style="padding-left: 14px; font-size: 15px; color: #999; flex-shrink: 0;">&#128269;</span>
+        <input id="map-search-input" type="text" placeholder="搜索地址..." autocomplete="off"
+               oninput="onSearchInput()" onfocus="onSearchFocus()" onkeydown="onSearchKeydown(event)"
+               style="flex: 1; padding: 10px 12px 10px 8px; border: none; outline: none;
+                      font-size: 14px; color: #333; background: transparent;
+                      font-family: inherit; min-width: 0;">
+        <button id="map-search-clear" onclick="clearSearchInput()" title="清除"
+                style="display: none; width: 24px; height: 24px; border-radius: 50%; border: none;
+                       background: #e0e0e0; color: #666; cursor: pointer; font-size: 14px;
+                       line-height: 22px; text-align: center; padding: 0; margin-right: 8px; flex-shrink: 0;">&times;</button>
+    </div>
+    <div id="map-search-dropdown" style="display: none; position: absolute; top: 100%; left: 0; right: 0;
+                margin-top: 6px; background: white; border-radius: 10px;
+                box-shadow: 0 4px 20px rgba(0,0,0,0.14); max-height: 320px; overflow-y: auto;
+                border: 1px solid #eee;"></div>
 </div>
 """
 
@@ -860,7 +1505,7 @@ def create_map(
     if use_cluster:
         marker_cluster = MarkerCluster(name="点聚类")
 
-        for gcj_lat, gcj_lon, wgs_lat, wgs_lon, item in gcj_points:
+        for i, (gcj_lat, gcj_lon, wgs_lat, wgs_lon, item) in enumerate(gcj_points):
             source = item.get("source", "unknown")
             color = source_colors.get(source, "gray")
             orig_addr = item.get("original_address", "N/A") or "N/A"
@@ -870,6 +1515,7 @@ def create_map(
             source_js = html.escape(json.dumps(source), quote=True)
 
             popup_html = f"""
+            <span class="dense-marker-idx" style="display:none;">{i}</span>
             <b>地址:</b> {html.escape(orig_addr)}<br>
             <b>标准化地址:</b> {html.escape(formatted_addr)}<br>
             <b>经纬度:</b> {wgs_lat:.6f}, {wgs_lon:.6f}<br>
@@ -878,11 +1524,13 @@ def create_map(
             <hr style="margin: 5px 0; border-color: #eee;">
             <div style="font-size: 11px;">
                 <button onclick="setDistancePoint('start', {gcj_lat}, {gcj_lon}, {addr_js}, {source_js})"
-                        class="two-point-btn" style="padding: 3px 8px; margin: 2px; background: #2ecc71; color: white; border: none; border-radius: 3px; cursor: pointer;">设为起点</button>
+                        class="two-point-btn" style="padding: 4px 10px; margin: 3px 2px; background: #2ecc71; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 11px;">设为起点</button>
                 <button onclick="setDistancePoint('end', {gcj_lat}, {gcj_lon}, {addr_js}, {source_js})"
-                        class="two-point-btn" style="padding: 3px 8px; margin: 2px; background: #e74c3c; color: white; border: none; border-radius: 3px; cursor: pointer;">设为终点</button>
+                        class="two-point-btn" style="padding: 4px 10px; margin: 3px 2px; background: #e74c3c; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 11px;">设为终点</button>
                 <button onclick="addRecordPoint({gcj_lat}, {gcj_lon}, {addr_js}, {source_js})"
-                        class="route-btn" style="padding: 3px 8px; margin: 2px; background: #4a90d9; color: white; border: none; border-radius: 3px; cursor: pointer; display: none;">记录点</button>
+                        class="route-btn" style="padding: 4px 10px; margin: 3px 2px; background: #4a90d9; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 11px; display: none;">记录点</button>
+                <button onclick="selectDenseCenter({i})"
+                        class="dense-btn" style="padding: 4px 10px; margin: 3px 2px; background: white; color: #ff9800; border: 1.5px solid #ff9800; border-radius: 4px; cursor: pointer; font-size: 11px; font-weight: 500; display: none;">选为圆心</button>
             </div>
             """
 
@@ -895,7 +1543,7 @@ def create_map(
 
         marker_cluster.add_to(feature_group_markers)
     else:
-        for gcj_lat, gcj_lon, wgs_lat, wgs_lon, item in gcj_points:
+        for i, (gcj_lat, gcj_lon, wgs_lat, wgs_lon, item) in enumerate(gcj_points):
             source = item.get("source", "unknown")
             color = source_colors.get(source, "gray")
             orig_addr = item.get("original_address", "N/A") or "N/A"
@@ -905,6 +1553,7 @@ def create_map(
             source_js = html.escape(json.dumps(source), quote=True)
 
             popup_html = f"""
+            <span class="dense-marker-idx" style="display:none;">{i}</span>
             <b>地址:</b> {html.escape(orig_addr)}<br>
             <b>标准化地址:</b> {html.escape(formatted_addr)}<br>
             <b>经纬度:</b> {wgs_lat:.6f}, {wgs_lon:.6f}<br>
@@ -913,11 +1562,13 @@ def create_map(
             <hr style="margin: 5px 0; border-color: #eee;">
             <div style="font-size: 11px;">
                 <button onclick="setDistancePoint('start', {gcj_lat}, {gcj_lon}, {addr_js}, {source_js})"
-                        class="two-point-btn" style="padding: 3px 8px; margin: 2px; background: #2ecc71; color: white; border: none; border-radius: 3px; cursor: pointer;">设为起点</button>
+                        class="two-point-btn" style="padding: 4px 10px; margin: 3px 2px; background: #2ecc71; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 11px;">设为起点</button>
                 <button onclick="setDistancePoint('end', {gcj_lat}, {gcj_lon}, {addr_js}, {source_js})"
-                        class="two-point-btn" style="padding: 3px 8px; margin: 2px; background: #e74c3c; color: white; border: none; border-radius: 3px; cursor: pointer;">设为终点</button>
+                        class="two-point-btn" style="padding: 4px 10px; margin: 3px 2px; background: #e74c3c; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 11px;">设为终点</button>
                 <button onclick="addRecordPoint({gcj_lat}, {gcj_lon}, {addr_js}, {source_js})"
-                        class="route-btn" style="padding: 3px 8px; margin: 2px; background: #4a90d9; color: white; border: none; border-radius: 3px; cursor: pointer; display: none;">记录点</button>
+                        class="route-btn" style="padding: 4px 10px; margin: 3px 2px; background: #4a90d9; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 11px; display: none;">记录点</button>
+                <button onclick="selectDenseCenter({i})"
+                        class="dense-btn" style="padding: 4px 10px; margin: 3px 2px; background: white; color: #ff9800; border: 1.5px solid #ff9800; border-radius: 4px; cursor: pointer; font-size: 11px; font-weight: 500; display: none;">选为圆心</button>
             </div>
             """
 
@@ -982,14 +1633,37 @@ def create_map(
     """
     m.get_root().html.add_child(folium.Element(legend_html))
 
-    # 注入测距功能（JS 外部化，共享引用减体积）
+    # 注入测距/搜索功能（内联嵌入，无外部依赖）
     output_path = Path(output_file)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    _ensure_shared_js(output_path.parent)
+    _inline_js = DISTANCE_JS.strip()
+    if _inline_js.startswith("<script>"):
+        _inline_js = _inline_js[len("<script>"):]
+    if _inline_js.endswith("</script>"):
+        _inline_js = _inline_js[:-len("</script>")]
     m.get_root().html.add_child(
-        folium.Element(f'<script src="{_SHARED_JS_FILENAME}"></script>')
+        folium.Element(f'<script>{_inline_js}</script>')
     )
     m.get_root().html.add_child(folium.Element(DISTANCE_PANEL))
+
+    # 注入密集搜索功能
+    m.get_root().html.add_child(folium.Element(DENSE_SEARCH_PANEL))
+    # 注入地图搜索栏
+    m.get_root().html.add_child(folium.Element(MAP_SEARCH_BAR))
+    # 序列化标记数据（GCJ-02 坐标，匹配地图瓦片），供密集搜索使用
+    marker_data = []
+    for i, (gcj_lat, gcj_lon, wgs_lat, wgs_lon, item) in enumerate(gcj_points):
+        orig_addr = item.get("original_address", "N/A") or "N/A"
+        marker_data.append({
+            "idx": i,
+            "gcjLat": gcj_lat, "gcjLon": gcj_lon,
+            "wgsLat": wgs_lat, "wgsLon": wgs_lon,
+            "address": orig_addr,
+            "source": item.get("source", "unknown")
+        })
+    m.get_root().html.add_child(
+        folium.Element(f'<script>_denseMarkerData = {json.dumps(marker_data, ensure_ascii=False)};</script>')
+    )
 
     m.save(str(output_path))
 
@@ -1601,12 +2275,16 @@ def create_map_with_routes(
     )
     m.get_root().html.add_child(folium.Element(legend_html))
 
-    # 注入测距功能（JS 外部化）
+    # 注入测距/搜索功能（内联嵌入，无外部依赖）
     output_path = Path(output_file)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    _ensure_shared_js(output_path.parent)
+    _inline_js = DISTANCE_JS.strip()
+    if _inline_js.startswith("<script>"):
+        _inline_js = _inline_js[len("<script>"):]
+    if _inline_js.endswith("</script>"):
+        _inline_js = _inline_js[:-len("</script>")]
     m.get_root().html.add_child(
-        folium.Element(f'<script src="{_SHARED_JS_FILENAME}"></script>')
+        folium.Element(f'<script>{_inline_js}</script>')
     )
     m.get_root().html.add_child(folium.Element(DISTANCE_PANEL))
 

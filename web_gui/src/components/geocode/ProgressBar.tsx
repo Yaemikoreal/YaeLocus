@@ -1,24 +1,26 @@
 import { formatDuration } from '../../lib/utils'
 
 interface Props {
-  progress: number
   total: number
   current: number
   success: number
   startTime: number
 }
 
-export default function ProgressBar({ progress, total, current, success, startTime }: Props) {
-  const pct = total > 0 ? Math.round((progress / total) * 100) : 0
+export default function ProgressBar({ total, current, success, startTime }: Props) {
+  const safeTotal = total || 0
+  const safeCurrent = current || 0
+  const safeSuccess = success || 0
+  const pct = safeTotal > 0 ? Math.round((safeCurrent / safeTotal) * 100) : 0
   const elapsed = (Date.now() - startTime) / 1000
-  const speed = elapsed > 0 ? current / elapsed : 0
-  const remaining = speed > 0 ? (total - current) / speed : 0
+  const speed = elapsed > 0 ? safeCurrent / elapsed : 0
+  const remaining = speed > 0 ? (safeTotal - safeCurrent) / speed : 0
 
   return (
     <div style={{ marginTop: 20 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8, fontSize: 14 }}>
         <span>
-          已处理 {progress}/{total}
+          已处理 {safeCurrent}/{safeTotal}
         </span>
         <span style={{ fontWeight: 600 }}>{pct}%</span>
       </div>
@@ -49,7 +51,7 @@ export default function ProgressBar({ progress, total, current, success, startTi
           color: '#888',
         }}
       >
-        <span>成功: {success}</span>
+        <span>成功: {safeSuccess}</span>
         <span>
           速度: {speed.toFixed(1)} 条/秒 · 预计剩余: {formatDuration(remaining)}
         </span>

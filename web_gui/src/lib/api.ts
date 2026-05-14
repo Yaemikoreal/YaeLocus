@@ -12,6 +12,8 @@ import type {
   ConfigSaveRequest,
   ConfigTestResponse,
   BatchStatusResponse,
+  CompletedTask,
+  TasksResponse,
 } from './types';
 
 // ── Fetch 封装 ──
@@ -109,6 +111,7 @@ export function batchGeocodeStream(
   file: File,
   column: string,
   workers: string,
+  city: string | null,
   onProgress: (event: {
     step: string;
     label: string;
@@ -126,6 +129,9 @@ export function batchGeocodeStream(
   form.append('file', file);
   form.append('column', column);
   form.append('workers', workers);
+  if (city && city.trim()) {
+    form.append('city', city.trim());
+  }
 
   const url = `${API_BASE}/api/geocode/batch/stream`;
 
@@ -175,8 +181,9 @@ export function batchGeocodeStream(
               results.push(parsed.data);
               onResult(parsed.data);
             }
-            // 任何包含 current 字段的事件都作为进度推送
-            if (parsed.current !== undefined && parsed.total) {
+            // 任何包含 current 和 total 字段的事件都作为进度推送
+            if (parsed.current !== undefined && parsed.total !== undefined) {
+              console.log('[api.ts] onProgress 触发:', { current: parsed.current, total: parsed.total, success: parsed.success })
               onProgress(parsed);
             }
           } catch {
@@ -373,4 +380,26 @@ export async function exportCache(
   signal?: AbortSignal
 ): Promise<{ stats: CacheStats; exported_at: number }> {
   return request('/api/cache/export', {}, signal);
+}
+
+// ── 任务历史 (已完成任务) ──
+export async function fetchCompletedTasks(
+  signal?: AbortSignal
+): Promise<CompletedTask[]> {
+  const data = await request<TasksResponse>('/api/tasks', {}, signal);
+  return data.tasks || [];
+}
+
+export async function fetchTaskDetail(
+  taskId: string,
+  signal?: AbortSignal
+): Promise<CompletedTask> {
+  return request<CompletedTask>(`/api/tasks/${taskId}`, {}, signal);
+}
+
+export async function deleteTask(
+  taskId: string,
+  signal?: AbortSignal
+): Promise<{ success: boolean; message: string }> {
+  return request(`/api/tasks/${taskId}`, { method: 'DELETE' }, signal);
 }

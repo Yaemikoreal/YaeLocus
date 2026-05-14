@@ -24,6 +24,8 @@ export default function APIKeyForm() {
 
   // Track which API keys are already configured (for placeholder display)
   const hasAmapKey = config?.apis?.includes('amap') ?? false
+  const hasBaiduKey = config?.apis?.includes('baidu') ?? false
+  const hasTiandituKey = config?.apis?.includes('tianditu') ?? false
 
   useEffect(() => {
     if (config && !initialized) {
@@ -53,15 +55,19 @@ export default function APIKeyForm() {
     onError: (e: Error) => toast.error(e.message),
   })
 
-  const testMutation = useMutation({
-    mutationFn: () => testAPIKeys({ amap_key: amapKey, baidu_ak: baiduAk, tianditu_tk: tiandituTk }),
-    onSuccess: (data) => setTestResults(data),
-    onError: () => toast.error('测试失败'),
-  })
-
-  const handleTest = (provider: keyof ConfigTestResponse) => {
+  const handleTest = async (provider: keyof ConfigTestResponse) => {
     setTestResults((prev) => ({ ...prev, [provider]: null }))
-    testMutation.mutate()
+    try {
+      const keys: Record<string, string> = {}
+      if (provider === 'amap') keys.amap_key = amapKey
+      if (provider === 'baidu') keys.baidu_ak = baiduAk
+      if (provider === 'tianditu') keys.tianditu_tk = tiandituTk
+      const data = await testAPIKeys(keys)
+      setTestResults((prev) => ({ ...prev, ...data }))
+    } catch {
+      setTestResults((prev) => ({ ...prev, [provider]: false }))
+      toast.error('测试失败')
+    }
   }
 
   const statusBadge = (key: keyof ConfigTestResponse) => {
@@ -105,7 +111,7 @@ export default function APIKeyForm() {
       <div style={{ marginBottom: 16 }}>
         <label style={{ display: 'block', fontSize: 13, fontWeight: 600, marginBottom: 6, color: '#555' }}>百度地图 AK</label>
         <div style={{ display: 'flex', gap: 8 }}>
-          <input type="password" value={baiduAk} onChange={(e) => setBaiduAk(e.target.value)} placeholder="百度 AK" style={inputStyle} />
+          <input type="password" value={baiduAk} onChange={(e) => setBaiduAk(e.target.value)} placeholder={hasBaiduKey ? '已配置，留空则不修改' : '百度 AK'} style={inputStyle} />
           <button onClick={() => handleTest('baidu')} style={{ padding: '8px 16px', background: '#e8eaed', border: 'none', borderRadius: 8, fontSize: 13, cursor: 'pointer', whiteSpace: 'nowrap', display: 'flex', alignItems: 'center', gap: 4 }}>
             <FlaskConical size={14} /> 测试
           </button>
@@ -117,7 +123,7 @@ export default function APIKeyForm() {
       <div style={{ marginBottom: 24 }}>
         <label style={{ display: 'block', fontSize: 13, fontWeight: 600, marginBottom: 6, color: '#555' }}>天地图 TK</label>
         <div style={{ display: 'flex', gap: 8 }}>
-          <input type="password" value={tiandituTk} onChange={(e) => setTiandituTk(e.target.value)} placeholder="天地图 Key" style={inputStyle} />
+          <input type="password" value={tiandituTk} onChange={(e) => setTiandituTk(e.target.value)} placeholder={hasTiandituKey ? '已配置，留空则不修改' : '天地图 Key'} style={inputStyle} />
           <button onClick={() => handleTest('tianditu')} style={{ padding: '8px 16px', background: '#e8eaed', border: 'none', borderRadius: 8, fontSize: 13, cursor: 'pointer', whiteSpace: 'nowrap', display: 'flex', alignItems: 'center', gap: 4 }}>
             <FlaskConical size={14} /> 测试
           </button>

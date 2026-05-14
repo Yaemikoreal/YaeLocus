@@ -1,7 +1,16 @@
 import type { ReactNode } from 'react'
+import { useQuery } from '@tanstack/react-query'
+import { fetchHealth } from '../../lib/api'
 import Navbar from './Navbar'
 
 export default function Layout({ children }: { children: ReactNode }) {
+  const { data: health } = useQuery({
+    queryKey: ['health'],
+    queryFn: ({ signal }) => fetchHealth(signal),
+    staleTime: 30_000,
+    retry: false,
+  })
+
   return (
     <>
       <Navbar />
@@ -24,7 +33,7 @@ export default function Layout({ children }: { children: ReactNode }) {
           borderTop: '1px solid #eae8e7',
         }}
       >
-        YaeLocus v1.6.0 · Web GUI ·{' '}
+        YaeLocus v{health?.version || '?.?.?'} · Web GUI ·{' '}
         <a
           href="https://github.com"
           target="_blank"

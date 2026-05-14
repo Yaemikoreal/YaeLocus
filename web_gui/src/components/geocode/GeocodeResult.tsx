@@ -38,7 +38,7 @@ export default function GeocodeResult({ result }: { result: GeocodeResultType })
   }
 
   const coordStr = `${result.latitude.toFixed(6)}, ${result.longitude.toFixed(6)}`
-  const sourceColor = getSourceColor(result.source)
+  const sourceColor = getSourceColor(result.source || 'unknown')
 
   const handleCopy = async () => {
     try {
@@ -85,7 +85,7 @@ export default function GeocodeResult({ result }: { result: GeocodeResultType })
                 color: sourceColor,
               }}
             >
-              {getSourceLabel(result.source)}
+              {getSourceLabel(result.source || 'unknown')}
             </span>
             {result.coordinate_system && (
               <span

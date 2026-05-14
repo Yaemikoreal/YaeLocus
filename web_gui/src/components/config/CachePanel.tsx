@@ -9,7 +9,7 @@ export default function CachePanel() {
   const { data: stats, isLoading, isError } = useQuery({
     queryKey: ['cacheStats'],
     queryFn: ({ signal }) => fetchCacheStats(signal),
-    refetchInterval: 10_000,
+    refetchInterval: 30_000,
   })
 
   const clearMutation = useMutation({
@@ -63,9 +63,9 @@ export default function CachePanel() {
             <StatCard label="总条目" value={stats.total_entries} color="#1a73e8" />
             <StatCard label="命中次数" value={stats.hits} color="#1e8e3e" />
             <StatCard label="未命中" value={stats.misses} color="#d93025" />
-            <StatCard label="命中率" value={`${(stats.hit_rate * 100).toFixed(1)}%`} color="#ff9d4d" />
-            <StatCard label="过期条目" value={stats.expired_entries} color="#6b6b6b" />
-            <StatCard label="待写入" value={stats.pending_writes} color="#6b6b6b" />
+            <StatCard label="命中率" value={`${(stats.hit_rate).toFixed(1)}%`} color="#ff9d4d" />
+            <StatCard label="过期条目" value={stats.expired_entries ?? 0} color="#6b6b6b" />
+            <StatCard label="待写入" value={stats.pending_writes ?? 0} color="#6b6b6b" />
           </div>
 
           {/* Actions */}

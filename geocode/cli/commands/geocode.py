@@ -115,6 +115,7 @@ def single(
 def batch(
     input: Path = typer.Option(..., "-i", "--input", help="输入文件路径，支持 CSV/XLSX/XLS"),
     column: str = typer.Option("地址", "-c", "--column", help="地址列名"),
+    city: Optional[str] = typer.Option(None, "--city", help="指定地市（如眉山市，提高模糊地址精度）"),
     output: Optional[Path] = typer.Option(None, "-o", "--output", help="输出文件路径"),
     map_file: Optional[Path] = typer.Option(None, "-m", "--map", help="地图输出路径"),
     cache_file: Optional[Path] = typer.Option(None, "--cache", help="缓存数据库路径"),
@@ -229,6 +230,32 @@ def batch(
                 invalid_raw.append((addr, reason))
 
         addresses = valid_raw
+
+        # === 指定地市前缀处理 ===
+        if city:
+            # 统一地市名称（确保以"市"结尾）
+            city_normalized = city.strip()
+            if not city_normalized.endswith("市") and not city_normalized.endswith("区") and not city_normalized.endswith("县"):
+                city_normalized = city_normalized + "市"
+
+            # 检查地址是否包含"市"的信息
+            # 如果地址没有包含任何"市"关键字，则添加指定地市前缀
+            # 如果地址已包含"市"（即使是其他市），则不添加
+            addresses_with_city = []
+
+            for addr in addresses:
+                # 检查地址是否已包含"市"的信息
+                if "市" in addr:
+                    # 地址已包含"市"的信息，不添加前缀
+                    addresses_with_city.append(addr)
+                else:
+                    # 地址没有包含"市"的信息，添加指定地市前缀
+                    addresses_with_city.append(f"{city_normalized}{addr}")
+
+            addresses = addresses_with_city
+
+            if not stdout_json:
+                console.print(f"[cyan]指定地市: {city_normalized}[/cyan]")
 
         # 输出过滤统计
         if not stdout_json and invalid_raw:
@@ -530,7 +557,7 @@ def batch(
 
         console.print(f"\n[green]{OK} 处理完成![/green]")
         console.print(f"  [cyan]结果:[/cyan] {output_path}")
-        if valid_results:
+        if success_count > 0:
             console.print(f"  [cyan]地图:[/cyan] {map_path}")
         console.print(f"  [cyan]缓存:[/cyan] {cache_path}")
         if verbose:

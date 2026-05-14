@@ -18,7 +18,7 @@ from .config import Config
 from .coords import gcj02_to_wgs84, bd09_to_wgs84
 from .logger import APILogger
 from .models import GeocodeResult
-from .preprocessing import InvalidAddressFilter, AddressNormalizer
+from .preprocessing import InvalidAddressFilter, AddressNormalizer, AddressSplitter
 from .validation import ConfidenceValidator
 
 
@@ -64,6 +64,7 @@ class Geocoder:
         # 预处理和验证组件 — 单例化避免重复 I/O
         self.normalizer = AddressNormalizer()
         self.filter_obj = InvalidAddressFilter()
+        self.splitter = AddressSplitter()
         self.validator = ConfidenceValidator()
 
         # 各 API 限流信号量
@@ -322,9 +323,15 @@ class Geocoder:
                 "confidence": {"total": 0, "issues": [reason], "is_trustworthy": False}
             }
 
-        # 2. 地址标准化和省份推断
-        normalized, meta = self.normalizer.normalize(str(address))
-        province_hint = meta.get("province_hint")
+        # 2. 地址拆分：处理 "公司名|地址" 格式
+        split_result = self.splitter.split(str(address))
+        address_part = split_result["address"]  # 提取实际地址部分
+
+        if not address_part or not address_part.strip():
+            return {"success": False, "original_address": str(address), "error": "Empty address after split"}
+
+        # 3. 地址清洗（使用拆分后的地址）
+        normalized, meta = self.normalizer.normalize(address_part)
 
         if not normalized or not normalized.strip():
             return {"success": False, "original_address": str(address), "error": "Empty address"}
@@ -332,7 +339,7 @@ class Geocoder:
         with self._counter_lock:
             self._request_count += 1
 
-        # 检查缓存（使用标准化地址）
+        # 检查缓存（使用清洗后的地址）
         cached = self.cache.get(normalized)
         if cached is not None:
             # 添加置信度标记（缓存结果视为可信）
@@ -340,22 +347,22 @@ class Geocoder:
                 cached["confidence"] = {"total": 100, "issues": [], "is_trustworthy": True}
             return cached
 
-        # 按优先级尝试各API（使用标准化地址）
+        # 按优先级尝试各API（使用清洗后的地址）
         for api_name in Config.API_PRIORITY:
             method = getattr(self, f"_geocode_{api_name}", None)
             if method:
-                result = method(normalized)  # 使用标准化地址调用API
+                result = method(normalized)  # 使用清洗后的地址调用API
                 if result:
                     result.success = True
                     with self._counter_lock:
                         self._success_count += 1
                     result_dict = result.to_dict()
 
-                    # === 结果验证阶段 ===
+                    # === 结果验证阶段（不再使用 province_hint）===
                     confidence = self.validator.validate(
                         str(address),  # 原始地址
                         result_dict,
-                        province_hint
+                        None  # 不再传入 province_hint
                     )
 
                     # 添加置信度字段
@@ -378,7 +385,6 @@ class Geocoder:
             "success": False,
             "original_address": str(address),
             "normalized_address": normalized,
-            "province_hint": province_hint,
             "error": "All APIs failed",
             "confidence": {"total": 0, "issues": ["All APIs failed"], "is_trustworthy": False}
         }

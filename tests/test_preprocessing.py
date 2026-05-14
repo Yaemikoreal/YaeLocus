@@ -88,56 +88,45 @@ class TestInvalidAddressFilter:
 
 
 class TestAddressNormalizer:
-    """地址标准化测试"""
+    """地址标准化测试（简化版 - 只清洗符号）"""
 
-    def test_province_completion_luzhou(self):
-        """泸州区县省份补全"""
-        normalizer = AddressNormalizer()
-        normalized, meta = normalizer.normalize("龙马潭区王氏商城C2区16号")
-        # 应推断为四川省
-        assert meta.get("province_hint") == "四川省"
-        assert "四川省" in normalized
-
-    def test_province_completion_jiangyang(self):
-        """江阳区省份补全"""
-        normalizer = AddressNormalizer()
-        normalized, meta = normalizer.normalize("江阳区龙透关路29号")
-        assert meta.get("province_hint") == "四川省"
-        assert "四川省" in normalized
-
-    def test_no_province_if_already_present(self):
-        """已有省份不重复补全"""
-        normalizer = AddressNormalizer()
-        normalized, meta = normalizer.normalize("四川省龙马潭区王氏商城")
-        # 已有省份，不重复添加
-        assert normalized.count("四川省") <= 1
-
-    def test_province_hint_for_beijing(self):
-        """北京区县推断"""
-        normalizer = AddressNormalizer()
-        normalized, meta = normalizer.normalize("朝阳区建国路88号")
-        assert meta.get("province_hint") == "北京市"
-
-    def test_province_hint_for_shanghai(self):
-        """上海区县推断"""
-        normalizer = AddressNormalizer()
-        # 使用更具体的上海区县名称
-        normalized, meta = normalizer.normalize("黄浦区南京路")
-        assert meta.get("province_hint") == "上海市"
-
-    def test_province_hint_for_shenzhen(self):
-        """深圳区县推断"""
-        normalizer = AddressNormalizer()
-        normalized, meta = normalizer.normalize("南山区科技园")
-        assert meta.get("province_hint") == "广东省"
-
-    def test_clean_basic_separators(self):
+    def test_clean_separators(self):
         """分隔符清洗"""
         normalizer = AddressNormalizer()
-        normalized, _ = normalizer.normalize("北京市，朝阳区；建国路")
+        normalized, meta = normalizer.normalize("北京市，朝阳区；建国路")
         # 分隔符统一为空格
         assert "，" not in normalized
         assert "；" not in normalized
+        assert meta.get("valid") is True
+
+    def test_clean_code_marker(self):
+        """编号标记清洗"""
+        normalizer = AddressNormalizer()
+        normalized, meta = normalizer.normalize("东坡区xxx路(RS01656)")
+        # 去除末尾编号标记
+        assert "(RS01656)" not in normalized
+        assert "RS01656" not in normalized
+        assert normalized == "东坡区xxx路"
+        assert meta.get("valid") is True
+
+    def test_clean_brackets(self):
+        """方括号编号清洗"""
+        normalizer = AddressNormalizer()
+        normalized, meta = normalizer.normalize("龙马潭区王氏商城【编号123】")
+        assert "【编号123】" not in normalized
+        assert normalized == "龙马潭区王氏商城"
+        assert meta.get("valid") is True
+
+    def test_no_province_modification(self):
+        """不修改地址内容（不添加省份）"""
+        normalizer = AddressNormalizer()
+        normalized, meta = normalizer.normalize("龙马潭区王氏商城C2区16号")
+        # 地址内容不应被修改
+        assert normalized == "龙马潭区王氏商城C2区16号"
+        # 不应添加省份前缀
+        assert "四川省" not in normalized
+        # 无 province_hint 字段
+        assert meta.get("province_hint") is None
 
     def test_empty_address(self):
         """空地址处理"""
@@ -145,6 +134,19 @@ class TestAddressNormalizer:
         normalized, meta = normalizer.normalize("")
         assert normalized == ""
         assert meta.get("valid") is False
+
+    def test_whitespace_address(self):
+        """空白地址处理"""
+        normalizer = AddressNormalizer()
+        normalized, meta = normalizer.normalize("   ")
+        assert normalized == ""
+        assert meta.get("valid") is False
+
+    def test_get_expected_province_deprecated(self):
+        """get_expected_province 已弃用"""
+        normalizer = AddressNormalizer()
+        result = normalizer.get_expected_province("龙马潭区")
+        assert result is None
 
 
 class TestIntegration:
@@ -160,15 +162,22 @@ class TestIntegration:
         assert is_valid is False
 
         # 有效数据标准化
-        normalized, meta = normalizer.normalize("龙马潭区王氏商城")
-        assert meta.get("province_hint") == "四川省"
+        normalized, meta = normalizer.normalize("龙马潭区王氏商城(RS001)")
+        assert normalized == "龙马潭区王氏商城"
+        assert meta.get("province_hint") is None  # 不再推断省份
 
-    def test_cross_province_keyword_coverage(self):
-        """跨省关键词覆盖测试"""
+    def test_normalizer_preserves_address(self):
+        """标准化器保留地址内容"""
         normalizer = AddressNormalizer()
 
-        # 测试泸州各区县
-        luzhou_districts = ["龙马潭", "江阳", "纳溪", "泸县", "合江", "叙永", "古蔺"]
-        for district in luzhou_districts:
-            normalized, meta = normalizer.normalize(f"{district}区某街道")
-            assert meta.get("province_hint") == "四川省"
+        # 测试多个地址
+        test_cases = [
+            ("北京市朝阳区建国路88号", "北京市朝阳区建国路88号"),
+            ("东坡区某街道(RS123)", "东坡区某街道"),
+            ("龙马潭区,王氏商城", "龙马潭区 王氏商城"),
+        ]
+
+        for original, expected in test_cases:
+            normalized, meta = normalizer.normalize(original)
+            assert normalized == expected
+            assert meta.get("province_hint") is None

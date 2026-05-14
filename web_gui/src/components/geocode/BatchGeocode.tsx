@@ -20,6 +20,7 @@ export default function BatchGeocode({ disabled }: Props) {
   const [file, setFile] = useState<File | null>(null)
   const [column, setColumn] = useState('地址')
   const [workers, setWorkers] = useState('auto')
+  const [city, setCity] = useState('')
   const [status, setStatus] = useState<'idle' | 'uploading' | 'running' | 'done' | 'error'>('idle')
   const [error, setError] = useState('')
   const [progress, setProgress] = useState<ProgressState>({ total: 0, current: 0, success: 0 })
@@ -68,7 +69,9 @@ export default function BatchGeocode({ disabled }: Props) {
       file,
       column,
       workers,
+      city,
       (evt) => {
+        console.log('[BatchGeocode] onProgress:', { total: evt.total, current: evt.current, success: evt.success })
         setStatus('running')
         setProgress({
           total: evt.total,
@@ -83,7 +86,7 @@ export default function BatchGeocode({ disabled }: Props) {
       (_taskId, res) => {
         if (timeoutRef.current) { clearTimeout(timeoutRef.current); timeoutRef.current = null }
         setStatus('done')
-        setResults(res || [])
+        if (res && res.length > 0) setResults(res)
       },
       (err) => {
         if (timeoutRef.current) { clearTimeout(timeoutRef.current); timeoutRef.current = null }
@@ -179,7 +182,7 @@ export default function BatchGeocode({ disabled }: Props) {
           }}
         >
           <FileText size={14} />
-          {file.name} ({(file.size / 1024).toFixed(1)} KB)
+          {file.name} ({file.size > 1024 * 1024 ? (file.size / (1024 * 1024)).toFixed(1) + ' MB' : (file.size / 1024).toFixed(1) + ' KB'})
           <button
             onClick={() => { setFile(null); setFileError('') }}
             style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 2, color: '#1a73e8' }}
@@ -235,6 +238,26 @@ export default function BatchGeocode({ disabled }: Props) {
             <option value="5">5</option>
           </select>
         </div>
+        <div style={{ width: 180 }}>
+          <label style={{ display: 'block', fontSize: 13, fontWeight: 600, marginBottom: 6, color: '#555' }}>
+            指定地市（可选）
+          </label>
+          <input
+            type="text"
+            value={city}
+            onChange={(e) => setCity(e.target.value)}
+            placeholder="如：眉山市"
+            style={{
+              width: '100%',
+              padding: '10px 14px',
+              border: '1.5px solid #eae8e7',
+              borderRadius: 8,
+              fontSize: 14,
+              outline: 'none',
+              fontFamily: 'inherit',
+            }}
+          />
+        </div>
       </div>
 
       {/* Action buttons */}
@@ -286,7 +309,6 @@ export default function BatchGeocode({ disabled }: Props) {
       {/* Progress */}
       {(status === 'running' || status === 'uploading') && (
         <ProgressBar
-          progress={progress.current}
           total={progress.total}
           current={progress.current}
           success={progress.success}

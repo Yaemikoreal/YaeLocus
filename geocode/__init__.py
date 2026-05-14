@@ -35,7 +35,7 @@ from .models import APIConfig, APILog, GeocodeResult
 from .optimizer import ItineraryOptimizer
 
 # 预处理和验证模块
-from .preprocessing import AddressNormalizer, InvalidAddressFilter
+from .preprocessing import AddressNormalizer, AddressSplitter, InvalidAddressFilter
 from .validation import ConfidenceScore, ConfidenceValidator, CrossProvinceChecker
 
 # 新模块 - 仅当可用时导入
@@ -96,6 +96,7 @@ __all__ = [
     # 新增导出
     "InvalidAddressFilter",
     "AddressNormalizer",
+    "AddressSplitter",
     "ConfidenceValidator",
     "ConfidenceScore",
     "CrossProvinceChecker",

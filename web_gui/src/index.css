@@ -59,3 +59,38 @@ body {
   from { transform: rotate(0deg); }
   to { transform: rotate(360deg); }
 }
+
+/* Leaflet 地图样式覆盖 */
+.leaflet-container {
+  font-family: var(--font-sans);
+}
+
+.leaflet-popup-content-wrapper {
+  border-radius: 8px;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+}
+
+.leaflet-popup-content {
+  margin: 12px;
+  font-size: 13px;
+}
+
+.leaflet-popup-tip {
+  box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+
+.custom-marker {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* 交互地图控制按钮 */
+.leaflet-control-zoom {
+  border-radius: 8px !important;
+  box-shadow: 0 2px 6px rgba(0,0,0,0.15) !important;
+}
+
+.leaflet-control-zoom a {
+  border-radius: 0 !important;
+}
