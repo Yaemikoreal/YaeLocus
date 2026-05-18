@@ -14,9 +14,9 @@ import type {
   BatchStatusResponse,
   CompletedTask,
   TasksResponse,
+  ConfigHistoryEntry,
 } from './types';
 
-// ── Fetch 封装 ──
 class ApiError extends Error {
   code: number;
   constructor(message: string, code: number) {
@@ -52,12 +52,12 @@ async function request<T>(
   return res.json();
 }
 
-// ── 健康检查 (F14) ──
+// ── 健康检查 ──
 export async function fetchHealth(signal?: AbortSignal): Promise<HealthInfo> {
   return request<HealthInfo>('/api/health', {}, signal);
 }
 
-// ── 单地址地理编码 (F1) ──
+// ── 单地址地理编码 ──
 export async function geocodeSingle(
   address: string,
   signal?: AbortSignal
@@ -72,7 +72,7 @@ export async function geocodeSingle(
   );
 }
 
-// ── 逆地理编码 (F4) ──
+// ── 逆地理编码 ──
 export async function reverseGeocode(
   lat: number,
   lon: number,
@@ -88,7 +88,7 @@ export async function reverseGeocode(
   );
 }
 
-// ── 坐标转换 (F5) ──
+// ── 坐标转换 ──
 export async function convertCoords(
   lat: number,
   lon: number,
@@ -106,7 +106,7 @@ export async function convertCoords(
   );
 }
 
-// ── 批量地理编码 SSE 流式 (F2-F3) ──
+// ── 批量地理编码 SSE 流式 ──
 export function batchGeocodeStream(
   file: File,
   column: string,
@@ -176,14 +176,11 @@ export function batchGeocodeStream(
             if (parsed.task_id) {
               taskId = parsed.task_id;
             }
-            // 逐条 geocode 结果
             if (parsed.type === 'geocode_result' && parsed.data) {
               results.push(parsed.data);
               onResult(parsed.data);
             }
-            // 任何包含 current 和 total 字段的事件都作为进度推送
             if (parsed.current !== undefined && parsed.total !== undefined) {
-              console.log('[api.ts] onProgress 触发:', { current: parsed.current, total: parsed.total, success: parsed.success })
               onProgress(parsed);
             }
           } catch {
@@ -199,7 +196,7 @@ export function batchGeocodeStream(
     });
 }
 
-// ── 轮询批量任务状态 (F3) ──
+// ── 轮询批量任务状态 ──
 export async function fetchTaskStatus(
   taskId: string,
   signal?: AbortSignal
@@ -211,7 +208,7 @@ export async function fetchTaskStatus(
   );
 }
 
-// ── 地图文件列表 (F7) ──
+// ── 地图文件列表 ──
 export async function fetchMapFiles(signal?: AbortSignal): Promise<MapFile[]> {
   const data = await request<{ maps: MapFile[]; count: number }>(
     '/api/maps',
@@ -226,7 +223,7 @@ export function getMapViewUrl(filename: string): string {
   return `${API_BASE}/api/map/view/${encodeURIComponent(filename)}`;
 }
 
-// ── 数据文件列表 (F8) ──
+// ── 数据文件列表 ──
 export async function fetchDataFiles(
   signal?: AbortSignal
 ): Promise<DataFile[]> {
@@ -238,7 +235,7 @@ export async function fetchDataFiles(
   return data.files || [];
 }
 
-// ── AI 聊天 (SSE 流式) (F9) ──
+// ── AI 聊天 (SSE 流式) ──
 export function chatStream(
   prompt: string,
   context: ChatMessage[],
@@ -301,7 +298,7 @@ export function chatStream(
     });
 }
 
-// ── AI 命令执行 (F10, F11) ──
+// ── AI 命令执行 ──
 export async function executeCommand(
   command: string,
   signal?: AbortSignal
@@ -312,12 +309,12 @@ export async function executeCommand(
   }, signal);
 }
 
-// ── 配置获取 (F12) ──
+// ── 配置获取 ──
 export async function fetchConfig(signal?: AbortSignal): Promise<APIConfig> {
   return request<APIConfig>('/api/config', {}, signal);
 }
 
-// ── 配置保存 (F12) ──
+// ── 配置保存 ──
 export async function saveConfig(
   config: ConfigSaveRequest,
   signal?: AbortSignal
@@ -328,7 +325,12 @@ export async function saveConfig(
   form.append('tianditu_tk', config.tianditu_tk);
   form.append('ai_enabled', config.ai_enabled);
   form.append('ai_provider', config.ai_provider);
+  form.append('ai_model', config.ai_model || '');
   form.append('deepseek_key', config.deepseek_key);
+  form.append('qwen_key', config.qwen_key);
+  form.append('glm_key', config.glm_key);
+  form.append('moonshot_key', config.moonshot_key);
+  form.append('routing_mode', config.routing_mode || 'ai');
 
   const url = `${API_BASE}/api/config/save`;
   const res = await fetch(url, { method: 'POST', body: form, signal });
@@ -339,7 +341,7 @@ export async function saveConfig(
   return res.json();
 }
 
-// ── API Key 测试 (F12) ──
+// ── API Key 测试 ──
 export async function testAPIKeys(
   keys: { amap_key?: string; baidu_ak?: string; tianditu_tk?: string },
   signal?: AbortSignal
@@ -357,7 +359,35 @@ export async function testAPIKeys(
   return res.json();
 }
 
-// ── 缓存管理 (F13) ──
+// ── 配置变更历史 ──
+export async function fetchConfigHistory(
+  key?: string,
+  limit: number = 50,
+  signal?: AbortSignal
+): Promise<{ history: ConfigHistoryEntry[]; count: number }> {
+  const params = new URLSearchParams();
+  if (key) params.set('key', key);
+  params.set('limit', String(limit));
+  return request(`/api/config/history?${params.toString()}`, {}, signal);
+}
+
+// ── API 配额使用 ──
+export async function fetchApiUsage(
+  days: number = 30,
+  signal?: AbortSignal
+): Promise<{ usage: any[]; today: Record<string, any> }> {
+  return request(`/api/usage?days=${days}`, {}, signal);
+}
+
+export async function fetchApiUsageDetail(
+  apiName: string,
+  days: number = 30,
+  signal?: AbortSignal
+): Promise<{ api_name: string; today: any; history: any[] }> {
+  return request(`/api/usage/${apiName}?days=${days}`, {}, signal);
+}
+
+// ── 缓存管理 ──
 export async function fetchCacheStats(
   signal?: AbortSignal
 ): Promise<CacheStats> {
@@ -378,11 +408,11 @@ export async function cleanupCache(
 
 export async function exportCache(
   signal?: AbortSignal
-): Promise<{ stats: CacheStats; exported_at: number }> {
+): Promise<{ stats: CacheStats; exported_at: number; entries: any[] }> {
   return request('/api/cache/export', {}, signal);
 }
 
-// ── 任务历史 (已完成任务) ──
+// ── 任务历史 ──
 export async function fetchCompletedTasks(
   signal?: AbortSignal
 ): Promise<CompletedTask[]> {

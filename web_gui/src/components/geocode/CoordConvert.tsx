@@ -49,37 +49,35 @@ export default function CoordConvert() {
   }
 
   return (
-    <div style={{ background: 'rgba(43,18,0,0.02)', borderRadius: 8, padding: 28, marginBottom: 20 }}>
-      <h3 style={{ fontSize: 20, fontWeight: 600, color: '#1c1c1c', marginBottom: 4 }}>坐标转换</h3>
-      <p style={{ color: 'rgba(20,20,19,0.65)', fontSize: 14, marginBottom: 16 }}>
-        在 WGS-84、GCJ-02、BD-09 坐标系之间进行转换
-      </p>
+    <div className="card">
+      <h3 className="card-title">坐标转换</h3>
+      <p className="card-desc">在 WGS-84、GCJ-02、BD-09 坐标系之间进行转换</p>
 
       <form onSubmit={handleSubmit}>
-        <div style={{ display: 'flex', gap: 12, alignItems: 'flex-end', flexWrap: 'wrap' }}>
-          <div style={{ flex: 1, minWidth: 150 }}>
-            <label style={{ display: 'block', fontSize: 13, fontWeight: 600, marginBottom: 6, color: '#555' }}>纬度</label>
+        <div className="form-row" style={{ alignItems: 'flex-end' }}>
+          <div className="form-group" style={{ flex: 1, minWidth: 150 }}>
+            <label className="form-label">纬度</label>
             <input
               type="text" value={latStr} onChange={(e) => setLatStr(e.target.value)}
               placeholder="39.9087"
               disabled={mutation.isPending}
-              style={{ width: '100%', padding: '10px 14px', border: '1.5px solid #eae8e7', borderRadius: 8, fontSize: 14, outline: 'none', fontFamily: 'inherit' }}
+              className="form-input"
             />
           </div>
-          <div style={{ flex: 1, minWidth: 150 }}>
-            <label style={{ display: 'block', fontSize: 13, fontWeight: 600, marginBottom: 6, color: '#555' }}>经度</label>
+          <div className="form-group" style={{ flex: 1, minWidth: 150 }}>
+            <label className="form-label">经度</label>
             <input
               type="text" value={lonStr} onChange={(e) => setLonStr(e.target.value)}
               placeholder="116.3975"
               disabled={mutation.isPending}
-              style={{ width: '100%', padding: '10px 14px', border: '1.5px solid #eae8e7', borderRadius: 8, fontSize: 14, outline: 'none', fontFamily: 'inherit' }}
+              className="form-input"
             />
           </div>
-          <div style={{ width: 150 }}>
-            <label style={{ display: 'block', fontSize: 13, fontWeight: 600, marginBottom: 6, color: '#555' }}>源坐标系</label>
+          <div className="form-group" style={{ width: 150 }}>
+            <label className="form-label">源坐标系</label>
             <select
               value={from} onChange={(e) => setFrom(e.target.value as CoordSystem)}
-              style={{ width: '100%', padding: '10px 14px', border: '1.5px solid #eae8e7', borderRadius: 8, fontSize: 14, outline: 'none', background: '#fff', fontFamily: 'inherit' }}
+              className="form-input"
             >
               {SYSTEMS.map((s) => <option key={s.value} value={s.value}>{s.label}</option>)}
             </select>
@@ -87,11 +85,11 @@ export default function CoordConvert() {
           <div style={{ display: 'flex', alignItems: 'center', paddingBottom: 8 }}>
             <ArrowRight size={20} style={{ color: '#999' }} />
           </div>
-          <div style={{ width: 150 }}>
-            <label style={{ display: 'block', fontSize: 13, fontWeight: 600, marginBottom: 6, color: '#555' }}>目标坐标系</label>
+          <div className="form-group" style={{ width: 150 }}>
+            <label className="form-label">目标坐标系</label>
             <select
               value={to} onChange={(e) => setTo(e.target.value as CoordSystem)}
-              style={{ width: '100%', padding: '10px 14px', border: '1.5px solid #eae8e7', borderRadius: 8, fontSize: 14, outline: 'none', background: '#fff', fontFamily: 'inherit' }}
+              className="form-input"
             >
               {SYSTEMS.map((s) => <option key={s.value} value={s.value}>{s.label}</option>)}
             </select>
@@ -99,42 +97,36 @@ export default function CoordConvert() {
           <button
             type="submit"
             disabled={mutation.isPending || !latStr.trim() || !lonStr.trim()}
-            style={{
-              padding: '10px 24px', marginBottom: 0,
-              background: '#ff9d4d', color: 'rgba(20,20,19,0.88)', border: 'none', borderRadius: 10,
-              fontSize: 14, fontWeight: 600, cursor: 'pointer', transition: 'background 0.2s', whiteSpace: 'nowrap',
-            }}
+            className="btn btn-primary"
           >
             {mutation.isPending ? <Loader2 size={16} style={{ animation: 'spin 1s linear infinite' }} /> : '转换'}
           </button>
         </div>
-        {inputError && <div style={{ color: '#d93025', fontSize: 13, marginTop: 8 }}>{inputError}</div>}
+        {inputError && <div style={{ color: 'var(--error)', fontSize: 13, marginTop: 8 }}>{inputError}</div>}
       </form>
 
       {mutation.isError && (
-        <div style={{ marginTop: 16, padding: '12px 16px', background: '#fce8e6', borderRadius: 8, color: '#d93025', fontSize: 14 }}>
+        <div className="alert alert-error" style={{ marginTop: 16, marginBottom: 0 }}>
           {(mutation.error as Error)?.message || '转换失败'}
         </div>
       )}
 
       {result && (
-        <div style={{ marginTop: 16, padding: 16, background: '#e6f4ea', borderRadius: 8 }}>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-            <div>
-              <div style={{ fontSize: 13, color: '#6b6b6b', marginBottom: 4 }}>
-                {result.input.system} → {result.output.system}
-              </div>
-              <div style={{ fontSize: 16, fontFamily: 'ui-monospace, monospace', fontWeight: 600, color: '#1c1c1c' }}>
-                {result.output.latitude.toFixed(6)}, {result.output.longitude.toFixed(6)}
-              </div>
+        <div className="alert alert-success" style={{ marginTop: 16, marginBottom: 0, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div>
+            <div style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 4 }}>
+              {result.input.system} → {result.output.system}
             </div>
-            <button
-              onClick={() => handleCopy(`${result.output.latitude.toFixed(6)}, ${result.output.longitude.toFixed(6)}`)}
-              style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 6, borderRadius: 6, color: copied ? '#1e8e3e' : '#6b6b6b' }}
-            >
-              {copied ? <Check size={18} /> : <Copy size={18} />}
-            </button>
+            <div style={{ fontSize: 16, fontFamily: 'var(--font-mono)', fontWeight: 600, color: 'var(--text)' }}>
+              {result.output.latitude.toFixed(6)}, {result.output.longitude.toFixed(6)}
+            </div>
           </div>
+          <button
+            onClick={() => handleCopy(`${result.output.latitude.toFixed(6)}, ${result.output.longitude.toFixed(6)}`)}
+            style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 6, borderRadius: 6, color: copied ? 'var(--success)' : 'var(--text-muted)' }}
+          >
+            {copied ? <Check size={18} /> : <Copy size={18} />}
+          </button>
         </div>
       )}
     </div>

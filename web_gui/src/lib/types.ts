@@ -54,14 +54,43 @@ export interface CacheStats {
   expired_entries?: number;
   queue_size?: number;
   pending_writes?: number;
+  evictions?: number;
+}
+
+// ── API 配额使用 ──
+export interface ApiUsageToday {
+  api_name: string;
+  call_date: string;
+  call_count: number;
+  success_count: number;
+  fail_count: number;
+  daily_limit: number;
+  remaining: number;
+  last_called: number | null;
 }
 
 // ── API 配置 ──
 export interface APIConfig {
   apis: string[];
+  amap_key_configured?: boolean;
+  amap_key_masked?: string;
+  baidu_ak_configured?: boolean;
+  baidu_ak_masked?: string;
+  tianditu_tk_configured?: boolean;
+  tianditu_tk_masked?: string;
   ai_enabled: boolean;
   ai_provider: string;
-  routing_mode: string;
+  ai_model?: string;
+  deepseek_key_configured?: boolean;
+  deepseek_key_masked?: string;
+  qwen_key_configured?: boolean;
+  qwen_key_masked?: string;
+  glm_key_configured?: boolean;
+  glm_key_masked?: string;
+  moonshot_key_configured?: boolean;
+  moonshot_key_masked?: string;
+  routing_mode?: string;
+  api_usage?: Record<string, ApiUsageToday>;
   cache: CacheStats;
 }
 
@@ -104,6 +133,7 @@ export interface CompletedTask {
   input_file: string;
   column: string;
   city?: string | null;
+  workers?: number;
   total: number;
   success: number;
   failed: number;
@@ -111,6 +141,7 @@ export interface CompletedTask {
   map_output?: string | null;
   started_at: number;
   completed_at?: number | null;
+  duration_sec?: number | null;
   error?: string | null;
   results?: GeocodeResult[];
 }
@@ -133,11 +164,44 @@ export interface ConfigSaveRequest {
   tianditu_tk: string;
   ai_enabled: string;
   ai_provider: string;
+  ai_model: string;
   deepseek_key: string;
+  qwen_key: string;
+  glm_key: string;
+  moonshot_key: string;
+  routing_mode: string;
 }
 
 export interface ConfigTestResponse {
   amap?: boolean | null;
   baidu?: boolean | null;
   tianditu?: boolean | null;
+}
+
+// ── 配置变更历史 ──
+export interface ConfigHistoryEntry {
+  id: number;
+  key: string;
+  old_value: string | null;
+  new_value: string | null;
+  changed_at: number;
+  changed_via: string;
+}
+
+// ── 缓存导出条目 ──
+export interface CacheExportEntry {
+  key: string;
+  address: string;
+  source: string | null;
+  formatted_address: string | null;
+  province: string | null;
+  city: string | null;
+  district: string | null;
+  latitude: number | null;
+  longitude: number | null;
+  confidence: number | null;
+  created_at: number | null;
+  expires_at: number | null;
+  access_count: number | null;
+  last_accessed: number | null;
 }

@@ -11,13 +11,11 @@ export default function MapPage() {
   const [tab, setTab] = useState<'maps' | 'files' | 'interactive'>('maps')
   const [selectedFile, setSelectedFile] = useState<string | null>(null)
 
-  // 获取数据文件列表（用于交互地图）
   const { data: dataFiles } = useQuery({
     queryKey: ['dataFiles'],
     queryFn: () => fetchDataFiles(),
   })
 
-  // 从选定的 CSV 文件加载地图数据
   const { data: mapData, isLoading } = useQuery<{ data: GeocodeResult[] }>({
     queryKey: ['csvData', selectedFile],
     queryFn: async () => {
@@ -25,7 +23,6 @@ export default function MapPage() {
       const res = await fetch(`/api/file/content?path=output/csv/${encodeURIComponent(selectedFile)}`)
       if (!res.ok) return { data: [] }
       const text = await res.text()
-      // 解析 CSV 为 GeocodeResult 数组（支持引号转义）
       const parseCSVLine = (line: string): string[] => {
         const result: string[] = []
         let current = ''
@@ -64,45 +61,23 @@ export default function MapPage() {
   })
 
   return (
-    <div>
-      <h1 style={{ fontSize: 36, fontWeight: 600, color: 'rgba(20,20,19,0.88)', lineHeight: 1.3, marginBottom: 8 }}>
-        地图浏览
-      </h1>
-      <p style={{ color: 'rgba(20,20,19,0.65)', fontSize: 16, marginBottom: 32 }}>
-        浏览已生成的地图文件和处理数据文件，或在交互地图中测算距离
-      </p>
-
-      <div style={{ display: 'flex', gap: 0, marginBottom: 24, borderBottom: '1px solid #eae8e7' }}>
+    <div className="page">
+      <div className="tab-bar">
         <button
           onClick={() => setTab('maps')}
-          style={{
-            padding: '10px 20px', fontSize: 14, fontWeight: tab === 'maps' ? 600 : 400,
-            color: tab === 'maps' ? '#ff9d4d' : '#6b6b6b', background: 'none', border: 'none',
-            borderBottom: tab === 'maps' ? '2px solid #ff9d4d' : '2px solid transparent',
-            cursor: 'pointer', transition: 'all 0.2s', display: 'flex', alignItems: 'center', gap: 6,
-          }}
+          className={`tab-btn ${tab === 'maps' ? 'active' : ''}`}
         >
           <Globe size={16} /> 地图文件
         </button>
         <button
           onClick={() => setTab('files')}
-          style={{
-            padding: '10px 20px', fontSize: 14, fontWeight: tab === 'files' ? 600 : 400,
-            color: tab === 'files' ? '#ff9d4d' : '#6b6b6b', background: 'none', border: 'none',
-            borderBottom: tab === 'files' ? '2px solid #ff9d4d' : '2px solid transparent',
-            cursor: 'pointer', transition: 'all 0.2s', display: 'flex', alignItems: 'center', gap: 6,
-          }}
+          className={`tab-btn ${tab === 'files' ? 'active' : ''}`}
         >
           <FolderOpen size={16} /> 数据文件
         </button>
         <button
           onClick={() => setTab('interactive')}
-          style={{
-            padding: '10px 20px', fontSize: 14, fontWeight: tab === 'interactive' ? 600 : 400,
-            color: tab === 'interactive' ? '#ff9d4d' : '#6b6b6b', background: 'none', border: 'none',
-            borderBottom: tab === 'interactive' ? '2px solid #ff9d4d' : '2px solid transparent',
-            cursor: 'pointer', transition: 'all 0.2s', display: 'flex', alignItems: 'center', gap: 6,
-          }}
+          className={`tab-btn ${tab === 'interactive' ? 'active' : ''}`}
         >
           <Map size={16} /> 交互地图
         </button>
@@ -112,19 +87,13 @@ export default function MapPage() {
       {tab === 'files' && <FileBrowser />}
       {tab === 'interactive' && (
         <div>
-          {/* 数据文件选择 */}
           <div style={{ marginBottom: 16 }}>
-            <label style={{ fontSize: 14, color: '#666', marginRight: 8 }}>选择数据文件:</label>
+            <label className="form-label">选择数据文件</label>
             <select
               value={selectedFile || ''}
               onChange={(e) => setSelectedFile(e.target.value)}
-              style={{
-                padding: '6px 12px',
-                fontSize: 13,
-                borderRadius: 4,
-                border: '1px solid #dee2e6',
-                minWidth: 200,
-              }}
+              className="form-input"
+              style={{ display: 'inline-block', width: 'auto', minWidth: 200 }}
             >
               <option value="">-- 选择文件 --</option>
               {dataFiles?.filter(f => f.name.endsWith('.csv')).map((f) => (
@@ -133,10 +102,9 @@ export default function MapPage() {
             </select>
           </div>
 
-          {/* 交互地图 */}
           {selectedFile ? (
             isLoading ? (
-              <div style={{ textAlign: 'center', padding: 48, color: '#888' }}>加载中...</div>
+              <div className="empty-state"><p>加载中...</p></div>
             ) : (
               <MapView
                 data={mapData?.data || []}
@@ -145,9 +113,9 @@ export default function MapPage() {
               />
             )
           ) : (
-            <div style={{ textAlign: 'center', padding: 48, color: '#888', background: 'rgba(43,18,0,0.02)', borderRadius: 8 }}>
-              <Map size={48} color="#4a90d9" style={{ marginBottom: 16 }} />
-              <p>请选择一个 CSV 数据文件来在交互地图中查看和测算距离</p>
+            <div className="card" style={{ textAlign: 'center', padding: 48 }}>
+              <Map size={48} style={{ marginBottom: 16, color: 'var(--text-muted)' }} />
+              <p style={{ color: 'var(--text-muted)' }}>请选择一个 CSV 数据文件来在交互地图中查看和测算距离</p>
             </div>
           )}
         </div>

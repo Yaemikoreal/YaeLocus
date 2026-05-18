@@ -27,6 +27,7 @@ Usage:
 from .cache import CacheManager
 from .config import Config
 from .coords import bd09_to_gcj02, bd09_to_wgs84, gcj02_to_wgs84, haversine_km, wgs84_to_gcj02
+from .db import DatabaseManager
 from .errors import APIError, ConfigError, FileError, GeocodeError, NetworkError
 from .geocoder import Geocoder
 from .logger import APILogger
@@ -70,6 +71,7 @@ __all__ = [
     "Geocoder",
     "CacheManager",
     "APILogger",
+    "DatabaseManager",
     "create_map",
     "create_route_map",
     "Config",

@@ -1,7 +1,7 @@
 import { useState, useRef, useCallback } from 'react'
 import { chatStream } from '../../lib/api'
 import type { ChatMessage } from '../../lib/types'
-import { Send, Loader2, Bot, User, Square } from 'lucide-react'
+import { Send, Square } from 'lucide-react'
 
 export default function ChatPanel() {
   const [messages, setMessages] = useState<ChatMessage[]>([])
@@ -12,6 +12,7 @@ export default function ChatPanel() {
   const lastRenderRef = useRef(0)
   const abortRef = useRef<AbortController | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
+  const textareaRef = useRef<HTMLTextAreaElement>(null)
 
   const handleSend = useCallback(() => {
     const trimmed = input.trim()
@@ -33,7 +34,6 @@ export default function ChatPanel() {
       messages,
       (token) => {
         streamContent.current += token
-        // Throttle re-renders to ~20fps，避免每个 token 都全量 re-render
         const now = Date.now()
         if (now - lastRenderRef.current >= 50) {
           lastRenderRef.current = now
@@ -42,12 +42,10 @@ export default function ChatPanel() {
         }
       },
       () => {
-        // 最终渲染确保所有 token 显示
         setMessages([...updatedMessages, { role: 'assistant', content: streamContent.current }])
         setStreaming(false)
       },
       (err) => {
-        // 移除不完整的 assistant 消息
         setMessages(updatedMessages)
         setError(err)
         setStreaming(false)
@@ -68,109 +66,85 @@ export default function ChatPanel() {
     }
   }
 
-  return (
-    <div style={{ background: 'rgba(43,18,0,0.02)', borderRadius: 8, padding: 28 }}>
-      <h3 style={{ fontSize: 20, fontWeight: 600, color: '#1c1c1c', marginBottom: 4 }}>AI 对话</h3>
-      <p style={{ color: 'rgba(20,20,19,0.65)', fontSize: 14, marginBottom: 16 }}>
-        基于 LLM 的智能助手，可分析数据、回答地理编码相关问题
-      </p>
+  const handleTextareaInput = (e: React.FormEvent<HTMLTextAreaElement>) => {
+    const el = e.currentTarget
+    el.style.height = 'auto'
+    el.style.height = Math.min(el.scrollHeight, 120) + 'px'
+  }
 
-      <div
-        ref={scrollRef}
-        style={{
-          height: 400, overflow: 'auto', border: '1px solid #eae8e7', borderRadius: 8,
-          padding: 16, marginBottom: 16, background: '#fff',
-        }}
-      >
+  return (
+    <div className="chat-container">
+      <div ref={scrollRef} className="chat-messages">
         {messages.length === 0 && (
-          <div style={{ padding: 32, textAlign: 'center', color: '#888' }}>
-            <Bot size={48} style={{ color: '#ccc', marginBottom: 12 }} />
-            <div style={{ fontSize: 15, marginBottom: 4 }}>开始对话</div>
-            <div style={{ fontSize: 13, color: '#aaa' }}>输入消息与 AI 助手交流</div>
+          <div className="chat-welcome">
+            <div className="chat-welcome-icon">
+              <i className="fa-solid fa-sparkles" />
+            </div>
+            <h3>YaeLocus AI 助手</h3>
+            <p>基于地理数据的智能分析，支持数据洞察、路线规划和地址解析</p>
+            <div className="quick-actions">
+              <button className="quick-action" onClick={() => { setInput('分析最近编码数据的分布特征'); handleSend() }}>
+                分析数据分布
+              </button>
+              <button className="quick-action" onClick={() => { setInput('推荐一条高效的巡访路线'); handleSend() }}>
+                推荐巡访路线
+              </button>
+              <button className="quick-action" onClick={() => { setInput('这些地址中有哪些可能编码错误？'); handleSend() }}>
+                检测编码异常
+              </button>
+              <button className="quick-action" onClick={() => { setInput('帮我规划明天的出行路线'); handleSend() }}>
+                规划出行路线
+              </button>
+            </div>
           </div>
         )}
         {messages.map((msg, i) => (
-          <div
-            key={i}
-            style={{
-              marginBottom: 12,
-              display: 'flex',
-              gap: 8,
-              justifyContent: msg.role === 'user' ? 'flex-end' : 'flex-start',
-            }}
-          >
-            {msg.role === 'assistant' && (
-              <Bot size={18} style={{ color: '#ff9d4d', marginTop: 4, flexShrink: 0 }} />
-            )}
-            <div
-              style={{
-                maxWidth: '80%',
-                padding: '10px 14px',
-                borderRadius: 8,
-                background: msg.role === 'user' ? '#ff9d4d' : '#f5f7fa',
-                color: msg.role === 'user' ? 'rgba(20,20,19,0.88)' : '#1c1c1c',
-                fontSize: 14,
-                lineHeight: 1.5,
-                whiteSpace: 'pre-wrap',
-                wordBreak: 'break-word',
-              }}
-            >
-              {msg.content || (streaming && i === messages.length - 1 ? (
-                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-                  思考中<Loader2 size={12} style={{ animation: 'spin 1s linear infinite' }} />
-                </span>
-              ) : '')}
+          <div key={i} className="message">
+            <div className={`message-avatar ${msg.role}`}>
+              <i className={msg.role === 'user' ? 'fa-solid fa-user' : 'fa-solid fa-sparkles'} />
             </div>
-            {msg.role === 'user' && (
-              <User size={18} style={{ color: '#1a73e8', marginTop: 4, flexShrink: 0 }} />
-            )}
+            <div className="message-body">
+              <div className="message-role">{msg.role === 'user' ? '你' : 'YaeLocus AI'}</div>
+              <div className="message-content">
+                {msg.content || (streaming && i === messages.length - 1 ? (
+                  <span className="typing-indicator">
+                    <span></span><span></span><span></span>
+                  </span>
+                ) : '')}
+              </div>
+            </div>
           </div>
         ))}
       </div>
 
       {error && (
-        <div style={{ marginBottom: 12, padding: '8px 12px', background: '#fce8e6', borderRadius: 8, color: '#d93025', fontSize: 13 }}>
+        <div className="alert alert-error" style={{ margin: '0 24px 12px' }}>
           {error}
         </div>
       )}
 
-      <div style={{ display: 'flex', gap: 8 }}>
-        <textarea
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={handleKeyDown}
-          placeholder="输入消息，按 Enter 发送..."
-          disabled={streaming}
-          rows={2}
-          style={{
-            flex: 1, padding: '10px 14px', border: '1.5px solid #eae8e7', borderRadius: 8,
-            fontSize: 14, outline: 'none', fontFamily: 'inherit', resize: 'none',
-          }}
-        />
-        {streaming ? (
-          <button
-            onClick={handleCancel}
-            style={{
-              padding: '10px 20px', background: '#d93025', color: 'white',
-              border: 'none', borderRadius: 10, fontSize: 14, fontWeight: 600, cursor: 'pointer',
-              display: 'flex', alignItems: 'center', gap: 6, alignSelf: 'flex-end',
-            }}
-          >
-            <Square size={16} /> 停止
-          </button>
-        ) : (
-          <button
-            onClick={handleSend}
-            disabled={!input.trim()}
-            style={{
-              padding: '10px 20px', background: input.trim() ? '#ff9d4d' : '#ccc', color: 'rgba(20,20,19,0.88)',
-              border: 'none', borderRadius: 10, fontSize: 14, fontWeight: 600, cursor: input.trim() ? 'pointer' : 'not-allowed',
-              display: 'flex', alignItems: 'center', gap: 6, alignSelf: 'flex-end',
-            }}
-          >
-            <Send size={16} /> 发送
-          </button>
-        )}
+      <div className="chat-input-area">
+        <div className="chat-input-wrapper">
+          <textarea
+            ref={textareaRef}
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={handleKeyDown}
+            onInput={handleTextareaInput}
+            placeholder="输入你的问题，或描述你想分析的地理数据..."
+            disabled={streaming}
+            rows={1}
+          />
+          {streaming ? (
+            <button onClick={handleCancel} className="chat-send-btn" title="停止">
+              <Square size={16} />
+            </button>
+          ) : (
+            <button onClick={handleSend} disabled={!input.trim()} className="chat-send-btn" title="发送">
+              <Send size={16} />
+            </button>
+          )}
+        </div>
       </div>
     </div>
   )

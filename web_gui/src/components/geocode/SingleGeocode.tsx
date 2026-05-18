@@ -3,7 +3,7 @@ import { useMutation } from '@tanstack/react-query'
 import { geocodeSingle } from '../../lib/api'
 import type { GeocodeResult as GeocodeResultType } from '../../lib/types'
 import GeocodeResultCard from './GeocodeResult'
-import { Search, Loader2 } from 'lucide-react'
+import { Loader2 } from 'lucide-react'
 
 interface Props {
   disabled?: boolean
@@ -27,63 +27,28 @@ export default function SingleGeocode({ disabled }: Props) {
   }
 
   return (
-    <div
-      style={{
-        background: 'rgba(43,18,0,0.02)',
-        borderRadius: 8,
-        padding: 28,
-        marginBottom: 20,
-      }}
-    >
-      <h3 style={{ fontSize: 20, fontWeight: 600, color: '#1c1c1c', marginBottom: 4 }}>单地址编码</h3>
-      <p style={{ color: 'rgba(20,20,19,0.65)', fontSize: 14, marginBottom: 16 }}>
-        输入一个中文地址，查询其经纬度坐标
-      </p>
+    <div className="geocode-hero">
+      <h2>探索每一个位置</h2>
+      <p>输入地址或坐标，即刻获取精准的地理编码结果</p>
 
       <form onSubmit={handleSubmit}>
-        <div style={{ display: 'flex', gap: 12 }}>
+        <div className="geocode-input-wrapper">
           <input
             type="text"
             value={address}
             onChange={(e) => setAddress(e.target.value)}
             placeholder="输入地址，如：北京市朝阳区建国路88号"
             disabled={disabled || mutation.isPending}
-            style={{
-              flex: 1,
-              padding: '10px 14px',
-              border: '1.5px solid #eae8e7',
-              borderRadius: 8,
-              fontSize: 14,
-              outline: 'none',
-              transition: 'border-color 0.2s',
-              fontFamily: 'inherit',
-            }}
-            onFocus={(e) => (e.target.style.borderColor = '#ff9d4d')}
-            onBlur={(e) => (e.target.style.borderColor = '#eae8e7')}
           />
           <button
             type="submit"
             disabled={disabled || mutation.isPending || address.trim().length < 2}
-            style={{
-              display: 'inline-flex',
-              alignItems: 'center',
-              gap: 8,
-              padding: '10px 24px',
-              background: disabled || address.trim().length < 2 ? '#ccc' : '#ff9d4d',
-              color: 'rgba(20,20,19,0.88)',
-              border: 'none',
-              borderRadius: 10,
-              fontSize: 14,
-              fontWeight: 600,
-              cursor: disabled || address.trim().length < 2 ? 'not-allowed' : 'pointer',
-              transition: 'background 0.2s',
-              whiteSpace: 'nowrap',
-            }}
+            className="geocode-submit-btn"
           >
             {mutation.isPending ? (
               <Loader2 size={16} style={{ animation: 'spin 1s linear infinite' }} />
             ) : (
-              <Search size={16} />
+              <i className="fa-solid fa-search" />
             )}
             编码
           </button>
@@ -91,29 +56,13 @@ export default function SingleGeocode({ disabled }: Props) {
       </form>
 
       {mutation.isError && (
-        <div
-          style={{
-            marginTop: 16,
-            padding: '12px 16px',
-            background: '#fce8e6',
-            borderRadius: 8,
-            color: '#d93025',
-            fontSize: 14,
-          }}
-        >
+        <div className="alert alert-error" style={{ marginTop: 16, marginBottom: 0, maxWidth: 640, margin: '16px auto 0' }}>
           {(mutation.error as Error)?.message || '编码失败，请重试'}
         </div>
       )}
 
       {result && (
-        <div
-          style={{
-            marginTop: 16,
-            border: '1px solid #eae8e7',
-            borderRadius: 8,
-            overflow: 'hidden',
-          }}
-        >
+        <div className="result-card" style={{ maxWidth: 640, margin: '20px auto 0', textAlign: 'left' }}>
           <GeocodeResultCard result={result} />
         </div>
       )}

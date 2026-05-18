@@ -33,32 +33,26 @@ export default function AnalysisResult() {
   }
 
   return (
-    <div style={{ background: 'rgba(43,18,0,0.02)', borderRadius: 8, padding: 28 }}>
-      <h3 style={{ fontSize: 20, fontWeight: 600, color: '#1c1c1c', marginBottom: 4 }}>数据分析</h3>
-      <p style={{ color: 'rgba(20,20,19,0.65)', fontSize: 14, marginBottom: 16 }}>
-        对地理编码结果进行 AI 分析，获取数据洞察和统计信息
-      </p>
+    <div className="content-block">
+      <h3>数据分析</h3>
+      <p className="desc">对地理编码结果进行 AI 分析，获取数据洞察和统计信息</p>
 
-      <div style={{ display: 'flex', gap: 12, marginBottom: 16 }}>
-        <input
-          type="text"
-          value={filePath}
-          onChange={(e) => setFilePath(e.target.value)}
-          placeholder="输入 CSV 文件路径，如: output/csv/结果.csv"
-          disabled={mutation.isPending}
-          style={{
-            flex: 1, padding: '10px 14px', border: '1.5px solid #eae8e7', borderRadius: 8,
-            fontSize: 14, outline: 'none', fontFamily: 'monospace',
-          }}
-        />
+      <div className="form-row">
+        <div className="form-group" style={{ flex: 1 }}>
+          <input
+            type="text"
+            value={filePath}
+            onChange={(e) => setFilePath(e.target.value)}
+            placeholder="输入 CSV 文件路径，如: output/csv/结果.csv"
+            disabled={mutation.isPending}
+            className="form-input"
+            style={{ fontFamily: 'var(--font-mono)' }}
+          />
+        </div>
         <button
           onClick={handleAnalyze}
           disabled={mutation.isPending || !filePath.trim()}
-          style={{
-            display: 'inline-flex', alignItems: 'center', gap: 6, padding: '10px 24px',
-            background: '#ff9d4d', color: 'rgba(20,20,19,0.88)', border: 'none', borderRadius: 10,
-            fontSize: 14, fontWeight: 600, cursor: 'pointer', transition: 'background 0.2s', whiteSpace: 'nowrap',
-          }}
+          className="btn btn-primary"
         >
           {mutation.isPending ? <Loader2 size={16} style={{ animation: 'spin 1s linear infinite' }} /> : <BarChart3 size={16} />}
           分析
@@ -66,13 +60,13 @@ export default function AnalysisResult() {
       </div>
 
       {error && (
-        <div style={{ padding: '12px 16px', background: '#fce8e6', borderRadius: 8, color: '#d93025', fontSize: 14, display: 'flex', alignItems: 'center', gap: 8 }}>
+        <div className="alert alert-error">
           <AlertTriangle size={16} /> {error}
         </div>
       )}
 
       {result && (
-        <div style={{ padding: 16, background: '#fff', border: '1px solid #eae8e7', borderRadius: 8, fontSize: 14, lineHeight: 1.6, whiteSpace: 'pre-wrap', maxHeight: 500, overflow: 'auto' }}>
+        <div className="card" style={{ whiteSpace: 'pre-wrap', maxHeight: 500, overflow: 'auto', fontSize: 14, lineHeight: 1.6 }}>
           {result}
         </div>
       )}

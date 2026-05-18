@@ -1,9 +1,10 @@
-import { useState, useEffect } from 'react'
+import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { fetchConfig, saveConfig, testAPIKeys } from '../../lib/api'
 import type { ConfigTestResponse } from '../../lib/types'
-import { Loader2, Check, X, Save, FlaskConical } from 'lucide-react'
+import { Loader2, Check, X, Save, Plug, Route } from 'lucide-react'
 import { toast } from 'sonner'
+import { AI_PROVIDERS } from '../../lib/constants'
 
 export default function APIKeyForm() {
   const queryClient = useQueryClient()
@@ -16,37 +17,34 @@ export default function APIKeyForm() {
   const [amapKey, setAmapKey] = useState('')
   const [baiduAk, setBaiduAk] = useState('')
   const [tiandituTk, setTiandituTk] = useState('')
-  const [aiEnabled, setAiEnabled] = useState('false')
-  const [aiProvider, setAiProvider] = useState('deepseek')
+  const [aiEnabledOverride, setAiEnabledOverride] = useState<string | null>(null)
+  const [aiProviderOverride, setAiProviderOverride] = useState<string | null>(null)
+  const [aiModel, setAiModel] = useState('')
   const [deepseekKey, setDeepseekKey] = useState('')
-  const [initialized, setInitialized] = useState(false)
+  const [qwenKey, setQwenKey] = useState('')
+  const [glmKey, setGlmKey] = useState('')
+  const [moonshotKey, setMoonshotKey] = useState('')
+  const [routingModeOverride, setRoutingModeOverride] = useState<string | null>(null)
   const [testResults, setTestResults] = useState<ConfigTestResponse>({})
 
-  // Track which API keys are already configured (for placeholder display)
-  const hasAmapKey = config?.apis?.includes('amap') ?? false
-  const hasBaiduKey = config?.apis?.includes('baidu') ?? false
-  const hasTiandituKey = config?.apis?.includes('tianditu') ?? false
-
-  useEffect(() => {
-    if (config && !initialized) {
-      setAiEnabled(config.ai_enabled ? 'true' : 'false')
-      setAiProvider(config.ai_provider || 'deepseek')
-      setInitialized(true)
-    }
-  }, [config, initialized])
+  const aiEnabled = aiEnabledOverride ?? (config?.ai_enabled ? 'true' : 'false')
+  const aiProvider = aiProviderOverride ?? (config?.ai_provider || 'deepseek')
+  const routingMode = routingModeOverride ?? (config?.routing_mode || 'ai')
 
   const saveMutation = useMutation({
-    mutationFn: () => {
-      // Only send non-empty values to avoid overwriting stored keys
-      return saveConfig({
-        amap_key: amapKey,
-        baidu_ak: baiduAk,
-        tianditu_tk: tiandituTk,
-        ai_enabled: aiEnabled,
-        ai_provider: aiProvider,
-        deepseek_key: deepseekKey,
-      })
-    },
+    mutationFn: () => saveConfig({
+      amap_key: amapKey,
+      baidu_ak: baiduAk,
+      tianditu_tk: tiandituTk,
+      ai_enabled: aiEnabled,
+      ai_provider: aiProvider,
+      ai_model: aiModel,
+      deepseek_key: deepseekKey,
+      qwen_key: qwenKey,
+      glm_key: glmKey,
+      moonshot_key: moonshotKey,
+      routing_mode: routingMode,
+    }),
     onSuccess: (data) => {
       toast.success(data.message || '配置已保存')
       queryClient.invalidateQueries({ queryKey: ['config'] })
@@ -70,107 +68,127 @@ export default function APIKeyForm() {
     }
   }
 
-  const statusBadge = (key: keyof ConfigTestResponse) => {
+  const testBadge = (key: keyof ConfigTestResponse) => {
     if (testResults[key] === undefined) return null
-    if (testResults[key] === null) return <span style={{ fontSize: 12, color: '#6b6b6b' }}>测试中...</span>
-    if (testResults[key]) return <span style={{ fontSize: 12, color: '#1e8e3e', display: 'inline-flex', alignItems: 'center', gap: 4 }}><Check size={14} /> 有效</span>
-    return <span style={{ fontSize: 12, color: '#d93025', display: 'inline-flex', alignItems: 'center', gap: 4 }}><X size={14} /> 无效</span>
+    if (testResults[key] === null) return <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>测试中...</span>
+    if (testResults[key]) return <span style={{ fontSize: 11, color: 'var(--success)', display: 'inline-flex', alignItems: 'center', gap: 3 }}><Check size={13} /> 有效</span>
+    return <span style={{ fontSize: 11, color: 'var(--error)', display: 'inline-flex', alignItems: 'center', gap: 3 }}><X size={13} /> 无效</span>
   }
 
   if (isLoading) {
-    return <div style={{ padding: 48, textAlign: 'center', color: '#888' }}>加载中...</div>
-  }
-
-  const inputStyle: React.CSSProperties = {
-    width: '100%', padding: '10px 14px', border: '1.5px solid #eae8e7', borderRadius: 8, fontSize: 14, outline: 'none', fontFamily: 'monospace',
+    return <div style={{ padding: 48, textAlign: 'center', color: 'var(--text-muted)' }}>加载中...</div>
   }
 
   return (
-    <div style={{ background: 'rgba(43,18,0,0.02)', borderRadius: 8, padding: 28 }}>
-      <h3 style={{ fontSize: 20, fontWeight: 600, color: '#1c1c1c', marginBottom: 4 }}>API 密钥</h3>
-      <p style={{ color: 'rgba(20,20,19,0.65)', fontSize: 14, marginBottom: 20 }}>
-        至少配置一个地图 API 密钥即可使用。保存后将写入项目 .env 文件
-      </p>
-
-      {/* Amap */}
-      <div style={{ marginBottom: 16 }}>
-        <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, fontWeight: 600, marginBottom: 6, color: '#555' }}>
-          高德地图 API Key
-          <span style={{ display: 'inline-block', padding: '2px 6px', borderRadius: 4, fontSize: 11, background: '#e6f4ea', color: '#1e8e3e' }}>推荐</span>
-        </label>
-        <div style={{ display: 'flex', gap: 8 }}>
-          <input type="password" value={amapKey} onChange={(e) => setAmapKey(e.target.value)} placeholder={hasAmapKey ? '已配置，留空则不修改' : '32位 Key'} style={inputStyle} />
-          <button onClick={() => handleTest('amap')} style={{ padding: '8px 16px', background: '#e8eaed', border: 'none', borderRadius: 8, fontSize: 13, cursor: 'pointer', whiteSpace: 'nowrap', display: 'flex', alignItems: 'center', gap: 4 }}>
-            <FlaskConical size={14} /> 测试
-          </button>
+    <>
+      <div className="config-card">
+        <div className="config-card-header">
+          <div className="config-card-title"><i className="fa-solid fa-key" /> API 密钥</div>
         </div>
-        <div style={{ marginTop: 4 }}>{statusBadge('amap')}</div>
+
+        <div className="api-key-row">
+          <div className="api-key-name"><i className="fa-solid fa-map-location-dot" style={{ color: 'var(--color-primary)' }} /> 高德</div>
+          <input type="password" className="api-key-input" value={amapKey} onChange={(e) => setAmapKey(e.target.value)} placeholder={config?.amap_key_masked || (config?.amap_key_configured ? '已配置，留空则不修改' : '32位 Key')} />
+          <div className="api-key-status" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <i className={config?.amap_key_configured ? 'fa-solid fa-circle-check' : 'fa-solid fa-circle-minus'} style={{ color: config?.amap_key_configured ? 'var(--success)' : 'var(--text-faint)', fontSize: 14 }} />
+            <button className="btn btn-ghost btn-sm" style={{ padding: '2px 6px', fontSize: 11 }} onClick={() => handleTest('amap')} title="测试高德 Key"><Plug size={12} /> 测试</button>
+            {testBadge('amap')}
+          </div>
+        </div>
+
+        <div className="api-key-row">
+          <div className="api-key-name"><i className="fa-solid fa-globe" style={{ color: 'var(--success)' }} /> 天地图</div>
+          <input type="password" className="api-key-input" value={tiandituTk} onChange={(e) => setTiandituTk(e.target.value)} placeholder={config?.tianditu_tk_masked || (config?.tianditu_tk_configured ? '已配置，留空则不修改' : '天地图 Key')} />
+          <div className="api-key-status" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <i className={config?.tianditu_tk_configured ? 'fa-solid fa-circle-check' : 'fa-solid fa-circle-minus'} style={{ color: config?.tianditu_tk_configured ? 'var(--success)' : 'var(--text-faint)', fontSize: 14 }} />
+            <button className="btn btn-ghost btn-sm" style={{ padding: '2px 6px', fontSize: 11 }} onClick={() => handleTest('tianditu')} title="测试天地图 Key"><Plug size={12} /> 测试</button>
+            {testBadge('tianditu')}
+          </div>
+        </div>
+
+        <div className="api-key-row">
+          <div className="api-key-name"><i className="fa-solid fa-location-crosshairs" style={{ color: 'var(--info)' }} /> 百度</div>
+          <input type="password" className="api-key-input" value={baiduAk} onChange={(e) => setBaiduAk(e.target.value)} placeholder={config?.baidu_ak_masked || (config?.baidu_ak_configured ? '已配置，留空则不修改' : '百度 AK')} />
+          <div className="api-key-status" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <i className={config?.baidu_ak_configured ? 'fa-solid fa-circle-check' : 'fa-solid fa-circle-minus'} style={{ color: config?.baidu_ak_configured ? 'var(--success)' : 'var(--text-faint)', fontSize: 14 }} />
+            <button className="btn btn-ghost btn-sm" style={{ padding: '2px 6px', fontSize: 11 }} onClick={() => handleTest('baidu')} title="测试百度 Key"><Plug size={12} /> 测试</button>
+            {testBadge('baidu')}
+          </div>
+        </div>
       </div>
 
-      {/* Baidu */}
-      <div style={{ marginBottom: 16 }}>
-        <label style={{ display: 'block', fontSize: 13, fontWeight: 600, marginBottom: 6, color: '#555' }}>百度地图 AK</label>
-        <div style={{ display: 'flex', gap: 8 }}>
-          <input type="password" value={baiduAk} onChange={(e) => setBaiduAk(e.target.value)} placeholder={hasBaiduKey ? '已配置，留空则不修改' : '百度 AK'} style={inputStyle} />
-          <button onClick={() => handleTest('baidu')} style={{ padding: '8px 16px', background: '#e8eaed', border: 'none', borderRadius: 8, fontSize: 13, cursor: 'pointer', whiteSpace: 'nowrap', display: 'flex', alignItems: 'center', gap: 4 }}>
-            <FlaskConical size={14} /> 测试
-          </button>
+      <div className="config-card">
+        <div className="config-card-header">
+          <div className="config-card-title"><i className="fa-solid fa-robot" /> AI 配置</div>
         </div>
-        <div style={{ marginTop: 4 }}>{statusBadge('baidu')}</div>
-      </div>
-
-      {/* Tianditu */}
-      <div style={{ marginBottom: 24 }}>
-        <label style={{ display: 'block', fontSize: 13, fontWeight: 600, marginBottom: 6, color: '#555' }}>天地图 TK</label>
-        <div style={{ display: 'flex', gap: 8 }}>
-          <input type="password" value={tiandituTk} onChange={(e) => setTiandituTk(e.target.value)} placeholder={hasTiandituKey ? '已配置，留空则不修改' : '天地图 Key'} style={inputStyle} />
-          <button onClick={() => handleTest('tianditu')} style={{ padding: '8px 16px', background: '#e8eaed', border: 'none', borderRadius: 8, fontSize: 13, cursor: 'pointer', whiteSpace: 'nowrap', display: 'flex', alignItems: 'center', gap: 4 }}>
-            <FlaskConical size={14} /> 测试
-          </button>
-        </div>
-        <div style={{ marginTop: 4 }}>{statusBadge('tianditu')}</div>
-      </div>
-
-      <div style={{ borderTop: '1px solid #eae8e7', paddingTop: 20, marginBottom: 20 }}>
-        <h4 style={{ fontSize: 16, fontWeight: 600, color: '#555', marginBottom: 12 }}>AI 配置 (可选)</h4>
-        <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap' }}>
-          <div style={{ flex: 1, minWidth: 150 }}>
-            <label style={{ display: 'block', fontSize: 13, fontWeight: 600, marginBottom: 6, color: '#555' }}>启用 AI</label>
-            <select value={aiEnabled} onChange={(e) => setAiEnabled(e.target.value)}
-              style={{ width: '100%', padding: '10px 14px', border: '1.5px solid #eae8e7', borderRadius: 8, fontSize: 14, outline: 'none', background: '#fff', fontFamily: 'inherit' }}>
+        <div className="form-row">
+          <div className="form-group" style={{ flex: 1, minWidth: 140 }}>
+            <label className="form-label">启用 AI</label>
+            <select value={aiEnabled} onChange={(e) => setAiEnabledOverride(e.target.value)} className="form-input">
               <option value="false">关闭</option>
               <option value="true">开启</option>
             </select>
           </div>
-          <div style={{ flex: 1, minWidth: 150 }}>
-            <label style={{ display: 'block', fontSize: 13, fontWeight: 600, marginBottom: 6, color: '#555' }}>AI 供应商</label>
-            <select value={aiProvider} onChange={(e) => setAiProvider(e.target.value)}
-              style={{ width: '100%', padding: '10px 14px', border: '1.5px solid #eae8e7', borderRadius: 8, fontSize: 14, outline: 'none', background: '#fff', fontFamily: 'inherit' }}>
-              <option value="deepseek">DeepSeek</option>
-              <option value="qwen">通义千问</option>
-              <option value="glm">智谱 GLM</option>
-              <option value="moonshot">Moonshot</option>
+          <div className="form-group" style={{ flex: 1, minWidth: 140 }}>
+            <label className="form-label">AI 供应商</label>
+            <select value={aiProvider} onChange={(e) => setAiProviderOverride(e.target.value)} className="form-input">
+              {Object.entries(AI_PROVIDERS).map(([key, label]) => (
+                <option key={key} value={key}>{label}</option>
+              ))}
             </select>
           </div>
-          <div style={{ flex: 2, minWidth: 200 }}>
-            <label style={{ display: 'block', fontSize: 13, fontWeight: 600, marginBottom: 6, color: '#555' }}>API Key</label>
-            <input type="password" value={deepseekKey} onChange={(e) => setDeepseekKey(e.target.value)} placeholder="sk-..." style={inputStyle} />
+          <div className="form-group" style={{ flex: 1, minWidth: 140 }}>
+            <label className="form-label">AI 模型</label>
+            <input type="text" className="form-input" value={aiModel} onChange={(e) => setAiModel(e.target.value)} placeholder={config?.ai_model || '默认'} />
+          </div>
+        </div>
+
+        <div style={{ marginTop: 12 }}>
+          <div className="form-label" style={{ marginBottom: 8, fontSize: 12, color: 'var(--text-muted)' }}>供应商 API Key</div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 8 }}>
+            <div className="api-key-row" style={{ padding: '6px 8px', borderRadius: 6, background: 'var(--bg-secondary)' }}>
+              <div style={{ fontSize: 12, color: 'var(--text-muted)', minWidth: 60 }}>DeepSeek</div>
+              <input type="password" className="api-key-input" style={{ flex: 1 }} value={deepseekKey} onChange={(e) => setDeepseekKey(e.target.value)} placeholder={config?.deepseek_key_masked || (config?.deepseek_key_configured ? '已配置' : 'sk-...')} />
+              <i className={config?.deepseek_key_configured ? 'fa-solid fa-circle-check' : 'fa-solid fa-circle-minus'} style={{ color: config?.deepseek_key_configured ? 'var(--success)' : 'var(--text-faint)', fontSize: 12 }} />
+            </div>
+            <div className="api-key-row" style={{ padding: '6px 8px', borderRadius: 6, background: 'var(--bg-secondary)' }}>
+              <div style={{ fontSize: 12, color: 'var(--text-muted)', minWidth: 60 }}>通义千问</div>
+              <input type="password" className="api-key-input" style={{ flex: 1 }} value={qwenKey} onChange={(e) => setQwenKey(e.target.value)} placeholder={config?.qwen_key_masked || (config?.qwen_key_configured ? '已配置' : 'Key')} />
+              <i className={config?.qwen_key_configured ? 'fa-solid fa-circle-check' : 'fa-solid fa-circle-minus'} style={{ color: config?.qwen_key_configured ? 'var(--success)' : 'var(--text-faint)', fontSize: 12 }} />
+            </div>
+            <div className="api-key-row" style={{ padding: '6px 8px', borderRadius: 6, background: 'var(--bg-secondary)' }}>
+              <div style={{ fontSize: 12, color: 'var(--text-muted)', minWidth: 60 }}>智谱 GLM</div>
+              <input type="password" className="api-key-input" style={{ flex: 1 }} value={glmKey} onChange={(e) => setGlmKey(e.target.value)} placeholder={config?.glm_key_masked || (config?.glm_key_configured ? '已配置' : 'Key')} />
+              <i className={config?.glm_key_configured ? 'fa-solid fa-circle-check' : 'fa-solid fa-circle-minus'} style={{ color: config?.glm_key_configured ? 'var(--success)' : 'var(--text-faint)', fontSize: 12 }} />
+            </div>
+            <div className="api-key-row" style={{ padding: '6px 8px', borderRadius: 6, background: 'var(--bg-secondary)' }}>
+              <div style={{ fontSize: 12, color: 'var(--text-muted)', minWidth: 60 }}>Moonshot</div>
+              <input type="password" className="api-key-input" style={{ flex: 1 }} value={moonshotKey} onChange={(e) => setMoonshotKey(e.target.value)} placeholder={config?.moonshot_key_masked || (config?.moonshot_key_configured ? '已配置' : 'Key')} />
+              <i className={config?.moonshot_key_configured ? 'fa-solid fa-circle-check' : 'fa-solid fa-circle-minus'} style={{ color: config?.moonshot_key_configured ? 'var(--success)' : 'var(--text-faint)', fontSize: 12 }} />
+            </div>
           </div>
         </div>
       </div>
 
-      <button
-        onClick={() => saveMutation.mutate()}
-        disabled={saveMutation.isPending}
-        style={{
-          display: 'inline-flex', alignItems: 'center', gap: 8, padding: '10px 24px',
-          background: '#ff9d4d', color: 'rgba(20,20,19,0.88)', border: 'none', borderRadius: 10,
-          fontSize: 14, fontWeight: 600, cursor: 'pointer', transition: 'background 0.2s',
-        }}
-      >
+      <div className="config-card">
+        <div className="config-card-header">
+          <div className="config-card-title"><Route size={14} /> 路线规划</div>
+        </div>
+        <div className="form-row">
+          <div className="form-group" style={{ flex: 1, minWidth: 200 }}>
+            <label className="form-label">路线模式</label>
+            <select value={routingMode} onChange={(e) => setRoutingModeOverride(e.target.value)} className="form-input">
+              <option value="ai">AI 模式（零成本）</option>
+              <option value="api">API 模式（高德/百度付费）</option>
+            </select>
+          </div>
+        </div>
+      </div>
+
+      <button onClick={() => saveMutation.mutate()} disabled={saveMutation.isPending} className="btn btn-primary">
         {saveMutation.isPending ? <Loader2 size={16} style={{ animation: 'spin 1s linear infinite' }} /> : <Save size={16} />}
         保存配置
       </button>
-    </div>
+    </>
   )
 }

@@ -5,10 +5,9 @@
 """
 
 import os
-import sys
-from pathlib import Path
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from pathlib import Path
+from typing import Any, List, Optional
 
 from dotenv import load_dotenv
 
@@ -191,6 +190,14 @@ class Config:
         "baidu": 6000
     }
 
+    # AI 配额(次/日) — 无硬性限制，仅用于 UI 展示
+    AI_DAILY_LIMITS = {
+        "deepseek": 1000,
+        "qwen": 1000,
+        "glm": 1000,
+        "moonshot": 1000,
+    }
+
     # 坐标系
     COORDINATE_SYSTEMS = {
         "amap": "GCJ-02",
@@ -302,6 +309,24 @@ class Config:
         if cls.BAIDU_AK:
             return "baidu"
         return "amap"
+
+    @classmethod
+    def reload(cls) -> None:
+        """重新加载 .env 配置到类属性"""
+        from dotenv import load_dotenv
+        load_dotenv(ENV_FILE, override=True)
+        cls.AMAP_KEY = os.getenv("AMAP_KEY", "")
+        cls.BAIDU_AK = os.getenv("BAIDU_AK", "")
+        cls.TIANDITU_TK = os.getenv("TIANDITU_TK", "")
+        cls.AI_ENABLED = os.getenv("AI_ENABLED", "false").lower() == "true"
+        cls.AI_PROVIDER = os.getenv("AI_PROVIDER", "deepseek")
+        cls.AI_MODEL = os.getenv("AI_MODEL", "")
+        cls.DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
+        cls.QWEN_API_KEY = os.getenv("QWEN_API_KEY", "")
+        cls.GLM_API_KEY = os.getenv("GLM_API_KEY", "")
+        cls.MOONSHOT_API_KEY = os.getenv("MOONSHOT_API_KEY", "")
+        cls.ROUTING_MODE = os.getenv("ROUTING_MODE", "ai")
+        cls.ROUTING_AUTO_FALLBACK = os.getenv("ROUTING_AUTO_FALLBACK", "false").lower() == "true"
 
     @classmethod
     def validate(cls) -> bool:

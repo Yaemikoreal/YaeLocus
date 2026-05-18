@@ -14,7 +14,6 @@ export default function TaskHistory() {
   const [detailLoading, setDetailLoading] = useState(false)
   const [detailError, setDetailError] = useState('')
 
-  // 加载任务列表
   const loadTasks = useCallback(async () => {
     setLoading(true)
     setError('')
@@ -28,12 +27,14 @@ export default function TaskHistory() {
     }
   }, [])
 
-  // 初始加载
   useEffect(() => {
-    loadTasks()
-  }, [loadTasks])
+    let cancelled = false
+    fetchCompletedTasks()
+      .then((data) => { if (!cancelled) { setTasks(data); setLoading(false) } })
+      .catch((e) => { if (!cancelled) { setError((e as Error).message); setLoading(false) } })
+    return () => { cancelled = true }
+  }, [])
 
-  // 自动轮询运行中的任务
   useEffect(() => {
     const runningTasks = tasks.filter((t) => t.status === 'running')
     if (runningTasks.length === 0) return
@@ -43,7 +44,6 @@ export default function TaskHistory() {
         try {
           const data = await fetchTaskStatus(t.task_id)
           if (data.status === 'done' || data.status === 'error') {
-            // 任务完成，刷新列表
             loadTasks()
           }
         } catch {
@@ -65,15 +65,14 @@ export default function TaskHistory() {
       if (data.results && data.results.length > 0) {
         setDetailResults(data.results)
       } else if (data.csv_output) {
-        // 尝试从 CSV 文件读取结果
         try {
           const csvRes = await fetch(`${API_BASE}/api/file/content?path=${encodeURIComponent(data.csv_output.replace(/^.*output\//, 'output/'))}`)
           if (csvRes.ok) {
-            const csvData = await csvRes.json()
+            const csvData = await csvRes.json() as { preview?: Array<Record<string, string>> }
             if (csvData.preview && csvData.preview.length > 0) {
               const results: GeocodeResultType[] = csvData.preview
-                .filter((row: any) => row.latitude && row.longitude)
-                .map((row: any) => ({
+                .filter((row) => row.latitude && row.longitude)
+                .map((row) => ({
                   success: true,
                   latitude: parseFloat(row.latitude),
                   longitude: parseFloat(row.longitude),
@@ -89,7 +88,7 @@ export default function TaskHistory() {
             }
           }
         } catch {
-          // CSV 读取失败，使用默认消息
+          // CSV 读取失败
         }
         setDetailError('该任务无可用结果（结果文件可能已被移动或删除）')
       } else {
@@ -105,7 +104,6 @@ export default function TaskHistory() {
   const handleRefresh = useCallback(async (taskId: string) => {
     try {
       await fetchTaskStatus(taskId)
-      // 刷新完成后重新加载任务列表
       loadTasks()
     } catch {
       // ignore
@@ -129,19 +127,19 @@ export default function TaskHistory() {
 
   if (loading) {
     return (
-      <div style={{ background: 'rgba(43,18,0,0.02)', borderRadius: 8, padding: 28 }}>
-        <h3 style={{ fontSize: 20, fontWeight: 600, color: '#1c1c1c', marginBottom: 4 }}>已完成任务</h3>
-        <p style={{ color: 'rgba(20,20,19,0.65)', fontSize: 14 }}>加载中...</p>
+      <div className="card">
+        <h3 className="card-title">已完成任务</h3>
+        <p className="card-desc">加载中...</p>
       </div>
     )
   }
 
   if (error) {
     return (
-      <div style={{ background: 'rgba(43,18,0,0.02)', borderRadius: 8, padding: 28 }}>
-        <h3 style={{ fontSize: 20, fontWeight: 600, color: '#1c1c1c', marginBottom: 4 }}>已完成任务</h3>
-        <p style={{ color: '#d93025', fontSize: 14 }}>{error}</p>
-        <button onClick={loadTasks} style={{ marginTop: 8, padding: '8px 16px', background: '#e8eaed', border: 'none', borderRadius: 6, cursor: 'pointer' }}>
+      <div className="card">
+        <h3 className="card-title">已完成任务</h3>
+        <p style={{ color: 'var(--error)', fontSize: 14 }}>{error}</p>
+        <button onClick={loadTasks} className="btn btn-secondary btn-sm" style={{ marginTop: 8 }}>
           重试
         </button>
       </div>
@@ -150,88 +148,85 @@ export default function TaskHistory() {
 
   if (tasks.length === 0) {
     return (
-      <div style={{ background: 'rgba(43,18,0,0.02)', borderRadius: 8, padding: 28 }}>
-        <h3 style={{ fontSize: 20, fontWeight: 600, color: '#1c1c1c', marginBottom: 4 }}>已完成任务</h3>
-        <p style={{ color: 'rgba(20,20,19,0.65)', fontSize: 14 }}>暂无历史任务，上传文件并开始编码后记录将在此显示</p>
+      <div className="card">
+        <h3 className="card-title">已完成任务</h3>
+        <p className="card-desc">暂无历史任务，上传文件并开始编码后记录将在此显示</p>
       </div>
     )
   }
 
   return (
-    <div style={{ background: 'rgba(43,18,0,0.02)', borderRadius: 8, padding: 28 }}>
+    <div className="card">
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-        <h3 style={{ fontSize: 20, fontWeight: 600, color: '#1c1c1c' }}>已完成任务</h3>
-        <button onClick={loadTasks} style={{ padding: '6px 12px', background: '#e8eaed', border: 'none', borderRadius: 6, cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 13 }}>
+        <h3 className="card-title" style={{ marginBottom: 0 }}>已完成任务</h3>
+        <button onClick={loadTasks} className="btn btn-secondary btn-sm">
           <RefreshCw size={14} /> 刷新
         </button>
       </div>
 
       <div style={{ overflowX: 'auto' }}>
-        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+        <table className="data-table">
           <thead>
-            <tr style={{ background: '#f5f7fa', borderBottom: '2px solid #e0e0e0' }}>
-              <th style={{ padding: '8px 10px', textAlign: 'left', fontSize: 12 }}>任务 ID</th>
-              <th style={{ padding: '8px 10px', textAlign: 'left', fontSize: 12 }}>文件</th>
-              <th style={{ padding: '8px 10px', textAlign: 'left', fontSize: 12 }}>列名</th>
-              <th style={{ padding: '8px 10px', textAlign: 'left', fontSize: 12 }}>地市</th>
-              <th style={{ padding: '8px 10px', textAlign: 'center', fontSize: 12 }}>总数</th>
-              <th style={{ padding: '8px 10px', textAlign: 'center', fontSize: 12 }}>成功</th>
-              <th style={{ padding: '8px 10px', textAlign: 'center', fontSize: 12 }}>失败</th>
-              <th style={{ padding: '8px 10px', textAlign: 'center', fontSize: 12 }}>状态</th>
-              <th style={{ padding: '8px 10px', textAlign: 'left', fontSize: 12 }}>时间</th>
-              <th style={{ padding: '8px 10px', textAlign: 'center', fontSize: 12 }}>操作</th>
+            <tr>
+              <th>任务 ID</th>
+              <th>文件</th>
+              <th>列名</th>
+              <th>地市</th>
+              <th style={{ textAlign: 'center' }}>总数</th>
+              <th style={{ textAlign: 'center' }}>成功</th>
+              <th style={{ textAlign: 'center' }}>失败</th>
+              <th style={{ textAlign: 'center' }}>状态</th>
+              <th>时间</th>
+              <th style={{ textAlign: 'center' }}>操作</th>
             </tr>
           </thead>
           <tbody>
             {tasks.map((t) => {
               let statusBadge: React.ReactNode
               if (t.status === 'done') {
-                statusBadge = <span style={{ padding: '2px 8px', borderRadius: 4, fontSize: 12, background: '#e6f4ea', color: '#1e8e3e', fontWeight: 600 }}>已完成</span>
+                statusBadge = <span className="badge badge-success">已完成</span>
               } else if (t.status === 'error') {
-                statusBadge = <span style={{ padding: '2px 8px', borderRadius: 4, fontSize: 12, background: '#fce8e6', color: '#d93025', fontWeight: 600 }}>失败</span>
+                statusBadge = <span className="badge badge-error">失败</span>
               } else {
-                statusBadge = <span style={{ padding: '2px 8px', borderRadius: 4, fontSize: 12, background: '#e8f0fe', color: '#1a73e8', fontWeight: 600 }}>处理中</span>
+                statusBadge = <span className="badge badge-info">处理中</span>
               }
 
               return (
-                <tr key={t.task_id} style={{ borderBottom: '1px solid #f0f0f0' }}>
-                  <td style={{ padding: '8px 10px', fontFamily: 'monospace', fontSize: 11 }}>{t.task_id}</td>
-                  <td style={{ padding: '8px 10px', maxWidth: 150, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={t.input_file}>{t.input_file || '-'}</td>
-                  <td style={{ padding: '8px 10px' }}>{t.column || '-'}</td>
-                  <td style={{ padding: '8px 10px' }}>{t.city || '-'}</td>
-                  <td style={{ padding: '8px 10px', textAlign: 'center' }}>{t.total}</td>
-                  <td style={{ padding: '8px 10px', textAlign: 'center', color: '#1e8e3e', fontWeight: 600 }}>{t.status === 'done' ? t.success : '-'}</td>
-                  <td style={{ padding: '8px 10px', textAlign: 'center', color: '#d93025', fontWeight: 600 }}>{t.status === 'done' ? t.failed : '-'}</td>
-                  <td style={{ padding: '8px 10px', textAlign: 'center' }}>{statusBadge}</td>
-                  <td style={{ padding: '8px 10px', color: '#888', fontSize: 11 }}>{formatTime(t.started_at)}</td>
-                  <td style={{ padding: '8px 10px', textAlign: 'center', display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                <tr key={t.task_id}>
+                  <td style={{ fontFamily: 'monospace', fontSize: 11 }}>{t.task_id}</td>
+                  <td style={{ maxWidth: 150, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={t.input_file}>{t.input_file || '-'}</td>
+                  <td>{t.column || '-'}</td>
+                  <td>{t.city || '-'}</td>
+                  <td style={{ textAlign: 'center' }}>{t.total}</td>
+                  <td style={{ textAlign: 'center', color: 'var(--success)', fontWeight: 600 }}>{t.status === 'done' ? t.success : '-'}</td>
+                  <td style={{ textAlign: 'center', color: 'var(--error)', fontWeight: 600 }}>{t.status === 'done' ? t.failed : '-'}</td>
+                  <td style={{ textAlign: 'center' }}>{statusBadge}</td>
+                  <td style={{ color: 'var(--text-muted)', fontSize: 11 }}>{formatTime(t.started_at)}</td>
+                  <td style={{ textAlign: 'center', display: 'flex', gap: 4, flexWrap: 'wrap', justifyContent: 'center' }}>
                     {t.status === 'done' && (
                       <>
                         {t.csv_output && (
-                          <a href={`${API_BASE}/api/file/content?path=${encodeURIComponent(t.csv_output.replace(/^.*output\//, 'output/'))}`} target="_blank" rel="noreferrer" style={{ display: 'inline-flex', alignItems: 'center', gap: 2, padding: '4px 8px', background: '#e8f0fe', color: '#1a73e8', borderRadius: 4, fontSize: 11, textDecoration: 'none' }}>
+                          <a href={`${API_BASE}/api/file/content?path=${encodeURIComponent(t.csv_output.replace(/^.*output\//, 'output/'))}`} target="_blank" rel="noreferrer" className="btn btn-sm" style={{ background: 'var(--info-bg)', color: 'var(--info)', textDecoration: 'none' }}>
                             <FileText size={12} /> CSV
                           </a>
                         )}
                         {t.map_output && (
-                          <a href={`${API_BASE}/api/map/view/${encodeURIComponent(t.map_output.split('/').pop() || '')}`} target="_blank" rel="noreferrer" style={{ display: 'inline-flex', alignItems: 'center', gap: 2, padding: '4px 8px', background: '#e8f0fe', color: '#1a73e8', borderRadius: 4, fontSize: 11, textDecoration: 'none' }}>
+                          <a href={`${API_BASE}/api/map/view/${encodeURIComponent(t.map_output.split('/').pop() || '')}`} target="_blank" rel="noreferrer" className="btn btn-sm" style={{ background: 'var(--info-bg)', color: 'var(--info)', textDecoration: 'none' }}>
                             <MapPin size={12} /> 地图
                           </a>
                         )}
-                        <button onClick={() => handleViewDetail(t.task_id)}
-                          style={{ display: 'inline-flex', alignItems: 'center', gap: 4, padding: '4px 8px', background: '#ff9d4d', color: '#fff', border: 'none', borderRadius: 4, fontSize: 11, cursor: 'pointer' }}>
+                        <button onClick={() => handleViewDetail(t.task_id)} className="btn btn-primary btn-sm">
                           <Eye size={12} /> 明细
                         </button>
                       </>
                     )}
                     {t.status === 'running' && (
-                      <button onClick={() => handleRefresh(t.task_id)}
-                        style={{ display: 'inline-flex', alignItems: 'center', gap: 4, padding: '4px 8px', background: '#e8eaed', color: '#333', border: 'none', borderRadius: 4, fontSize: 11, cursor: 'pointer' }}>
+                      <button onClick={() => handleRefresh(t.task_id)} className="btn btn-secondary btn-sm">
                         <RefreshCw size={12} /> 刷新
                       </button>
                     )}
                     {t.status !== 'running' && (
-                      <button onClick={() => handleDelete(t.task_id)}
-                        style={{ display: 'inline-flex', alignItems: 'center', gap: 4, padding: '4px 8px', background: '#fce8e6', color: '#d93025', border: 'none', borderRadius: 4, fontSize: 11, cursor: 'pointer' }}>
+                      <button onClick={() => handleDelete(t.task_id)} className="btn btn-danger btn-sm">
                         <Trash2 size={12} />
                       </button>
                     )}
@@ -245,11 +240,10 @@ export default function TaskHistory() {
 
       {/* Detail Modal */}
       {detailTask && (
-        <div style={{ marginTop: 20, border: '1px solid #eae8e7', borderRadius: 8, overflow: 'hidden' }}>
-          <div style={{ padding: '12px 16px', background: '#f5f7fa', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <div className="detail-modal">
+          <div className="detail-modal-header">
             <strong style={{ fontSize: 14, fontFamily: 'monospace' }}>{detailTask}</strong>
-            <button onClick={() => { setDetailTask(null); setDetailResults([]) }}
-              style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 4, color: '#6b6b6b' }}>
+            <button onClick={() => { setDetailTask(null); setDetailResults([]) }} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 4, color: '#6b6b6b' }}>
               <X size={18} />
             </button>
           </div>

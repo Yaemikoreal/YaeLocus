@@ -28,7 +28,7 @@ createRoot(document.getElementById('root')!).render(
           position="top-right"
           toastOptions={{
             style: {
-              fontFamily: 'Inter, ui-sans-serif, system-ui, sans-serif',
+              fontFamily: 'var(--font-sans)',
               fontSize: '14px',
               borderRadius: '8px',
             },
