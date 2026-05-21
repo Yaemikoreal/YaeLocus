@@ -7,15 +7,18 @@ AI 模式使用大模型的地理知识估算距离/时间/路线描述，
 """
 
 import json
-import math
+import logging
 import re
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
-from ..coords import haversine_km
 from geocode.ai import AIClient
 from geocode.ai.prompts import ROUTE_ESTIMATION_PROMPT
+
+from ..coords import haversine_km
 from .models import RoutePoint, RouteResult, RouteSegment, TravelMode
+
+logger = logging.getLogger(__name__)
 
 
 class AIDirectionEngine:
@@ -118,10 +121,15 @@ class AIDirectionEngine:
                         waypoints, origin_address, destination_address,
                         waypoint_addresses,
                     )
-            except Exception:
-                pass
+                elif ai_data:
+                    logger.info("AI 估算结果未通过合理性检查，降级到 Haversine 估算")
+                else:
+                    logger.info("AI 估算返回空结果，降级到 Haversine 估算")
+            except Exception as e:
+                logger.warning("AI 路线估算失败 (%s)，降级到 Haversine 估算: %s", type(e).__name__, e)
 
         # 3. Haversine 后备（零成本）
+        logger.info("使用 Haversine 数学估算（AI 估算不可用或未通过验证）")
         return self._haversine_estimate(
             origin, destination, mode,
             waypoints, origin_address, destination_address,
@@ -147,7 +155,6 @@ class AIDirectionEngine:
             waypoint_addresses,
         )
 
-        last_error = None
         delay = self.retry_delay
 
         for attempt in range(self.max_retries + 1):
@@ -162,13 +169,16 @@ class AIDirectionEngine:
                     temperature=0.1,
                     max_tokens=1000,
                 )
-                return self._parse_ai_response(resp)
+                result = self._parse_ai_response(resp)
+                if result is None:
+                    logger.debug("AI 路线估算第 %d 次尝试：JSON 解析失败，响应文本: %s", attempt + 1, resp[:200])
+                return result
             except json.JSONDecodeError as e:
-                last_error = e
+                logger.debug("AI 路线估算第 %d 次尝试：JSONDecodeError: %s", attempt + 1, e)
             except (ConnectionError, TimeoutError) as e:
-                last_error = e
+                logger.debug("AI 路线估算第 %d 次尝试：连接/超时错误: %s", attempt + 1, e)
             except Exception as e:
-                last_error = e
+                logger.debug("AI 路线估算第 %d 次尝试：未知错误: %s", attempt + 1, e)
 
             if attempt < self.max_retries:
                 time.sleep(delay)

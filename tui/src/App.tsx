@@ -161,6 +161,8 @@ export function App() {
 
   // ── AI Agent 循环 ───────────────────────────────────────────
 
+  const SSE_CHUNK_TIMEOUT_MS = 30000
+
   const agentLoop = useCallback(async (prompt: string, fileContext?: string) => {
     setProcessing(true);
 
@@ -213,14 +215,25 @@ export function App() {
 
         const decoder = new TextDecoder();
         let buffer = '';
+        let lastChunkTime = Date.now();
 
         while (true) {
+          // Check chunk timeout
+          if (Date.now() - lastChunkTime > SSE_CHUNK_TIMEOUT_MS) {
+            addMessage({
+              role: 'error',
+              content: 'AI 响应超时，请检查网络连接后重试',
+            });
+            break;
+          }
+
           if (controller.signal.aborted) {
             reader.cancel();
             break;
           }
           const { done, value } = await reader.read();
           if (done) break;
+          lastChunkTime = Date.now();
           buffer += decoder.decode(value, { stream: true });
           const lines = buffer.split('\n');
           buffer = lines.pop() || '';
@@ -238,9 +251,16 @@ export function App() {
               }
               if (parsed.error) {
                 setStreamingText(null);
+                const errCode = parsed.code || 'unknown';
+                const errMap: Record<string, string> = {
+                  auth_error: 'AI 认证失败，请检查 API Key 配置',
+                  rate_limit: 'AI 请求过于频繁，请稍后重试',
+                  network_error: 'AI 网络连接失败，请检查网络',
+                  timeout: 'AI 请求超时，请稍后重试',
+                };
                 addMessage({
                   role: 'error',
-                  content: `AI 错误: ${parsed.error}`,
+                  content: errMap[errCode] || `AI 错误: ${parsed.error}`,
                 });
                 break;
               }

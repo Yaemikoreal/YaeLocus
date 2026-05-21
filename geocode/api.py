@@ -42,6 +42,13 @@ _cache: Optional[CacheManager] = None
 _logger: Optional[APILogger] = None
 
 
+def _find_column(df, candidates: list) -> Optional[str]:
+    for col in candidates:
+        if col in df.columns:
+            return col
+    return None
+
+
 def _server_log(msg: str, level: str = "INFO") -> None:
     ts = _dt.datetime.now().strftime("%H:%M:%S")
     tag = {"INFO": "●", "WARN": "▲", "ERROR": "✗"}.get(level, "●")
@@ -829,7 +836,14 @@ def create_api_app() -> FastAPI:
             "output": {"latitude": round(out_lat, 6), "longitude": round(out_lon, 6), "system": to_sys},
         }
 
-    # ── 命令执行 ──────────────────────────────────────────────────
+# ── 命令执行 ──────────────────────────────────────────────────
+
+    INTERACTIVE_COMMAND_PREFIXES = [
+        "ai route ",
+        "yaelocus ai route ",
+        "config setup",
+        "yaelocus config setup",
+    ]
 
     @app.post("/api/execute")
     async def execute_command(req: Request):
@@ -838,32 +852,56 @@ def create_api_app() -> FastAPI:
         if not cmd:
             raise HTTPException(400, "缺少 command 参数")
 
+        cmd_lower = cmd.lower()
+        for prefix in INTERACTIVE_COMMAND_PREFIXES:
+            if cmd_lower.startswith(prefix) and "--headless" not in cmd_lower:
+                return {
+                    "command": cmd,
+                    "exit_code": 1,
+                    "stdout": "",
+                    "stderr": f"命令 '{cmd.split()[0]} {cmd.split()[1] if len(cmd.split()) > 1 else ''}' 需要交互式输入，请使用对应的 Web API。路线规划请使用 /api/ai/route，数据分析请使用 /api/ai/analyze/stream。",
+                    "success": False,
+                }
+
+        import asyncio
+
         from .cli.app import app as typer_app
 
-        old_stdout, old_stderr = sys.stdout, sys.stderr
-        captured_out, captured_err = StringIO(), StringIO()
-        sys.stdout, sys.stderr = captured_out, captured_err
-
-        os.environ["YAELOCUS_TUI"] = "1"
+        def _run_cmd():
+            old_stdout, old_stderr = sys.stdout, sys.stderr
+            captured_out, captured_err = StringIO(), StringIO()
+            sys.stdout, sys.stderr = captured_out, captured_err
+            os.environ["YAELOCUS_TUI"] = "1"
+            try:
+                argv = shlex.split(cmd)
+                typer_app(argv, standalone_mode=False)
+                exit_code = 0
+            except SystemExit as e:
+                exit_code = e.code if isinstance(e.code, int) else (0 if e.code is None else 1)
+            except Exception as e:
+                exit_code = 1
+                captured_err.write(str(e))
+            finally:
+                sys.stdout, sys.stderr = old_stdout, old_stderr
+            return exit_code, captured_out.getvalue(), captured_err.getvalue()
 
         try:
-            argv = shlex.split(cmd)
-            typer_app(argv, standalone_mode=False)
-            exit_code = 0
-        except SystemExit as e:
-            exit_code = e.code if isinstance(e.code, int) else (0 if e.code is None else 1)
-        except Exception as e:
-            exit_code = 1
-            captured_err.write(str(e))
-        finally:
-            sys.stdout, sys.stderr = old_stdout, old_stderr
+            exit_code, raw_out, raw_err = await asyncio.wait_for(
+                asyncio.get_event_loop().run_in_executor(None, _run_cmd),
+                timeout=120,
+            )
+        except asyncio.TimeoutError:
+            return {
+                "command": cmd,
+                "exit_code": 124,
+                "stdout": "",
+                "stderr": "命令执行超时 (120秒)。如果命令需要交互式输入，请使用对应的 Web API。",
+                "success": False,
+            }
 
         _ansi_re = re.compile(r'\x1b\[[0-9;]*[a-zA-Z]')
-        raw_out = captured_out.getvalue()
         clean_out = _ansi_re.sub('', raw_out)
-        clean_out = re.sub(r'[─━│┃┄┅┆┇┈┉┊┋┌┍┎┏┐┑┒┓└┕┖┗┘┙┚┛├┝┞┟┠┡┢┣┤┥┦┧┨┩┪┫┬┭┮┯┰╱╲╳╴┵┶┷┸╹╺┻┼┽┾┿╀╁╂╃╄╅╆╇╈╉╊╋╌╍╎╏═║╒╓╔╕╖╗╘╙╚╛╜╝╞╟╠╡╢╣╤╥╦╧╨╩╪╫╬╭╮╯╰]', '', clean_out)
-
-        raw_err = captured_err.getvalue()
+        clean_out = re.sub(r'[─━│┃┄┅┆┇┈┉┊┋┌┍┎┏┐┑┒┓└┕┖┗┘┙┚┛├┝┞┟┠┡┢┣┤┥┦┧┨┩┪┫┬┭┮┯╰╱╲╳╴┵┶┷╸╹╺┻┼┽┾┿╀╁╂╃╄╅╆╇╈╉╊╋╌╍╎╏═║╒╓╔╕╖╗╘╙╚╛╜╝╞╟╠╡╢╣╤╥╦╧╨╩╪╫╬╭╮╯╰]', '', clean_out)
         clean_err = _ansi_re.sub('', raw_err)
 
         return {
@@ -876,11 +914,27 @@ def create_api_app() -> FastAPI:
 
     # ── AI 对话 ───────────────────────────────────────────────────
 
+    def _validate_context(context: list) -> list:
+        if not isinstance(context, list):
+            return []
+        validated = []
+        for msg in context:
+            if not isinstance(msg, dict):
+                continue
+            role = msg.get("role", "")
+            if role not in ("user", "assistant"):
+                continue
+            content = msg.get("content", "")
+            if not isinstance(content, str):
+                continue
+            validated.append({"role": role, "content": content})
+        return validated
+
     @app.post("/api/chat")
     async def chat(req: Request):
         body = await req.json()
         prompt = body.get("prompt", "").strip()
-        context = body.get("context", [])
+        context = _validate_context(body.get("context", []))
 
         if not prompt:
             raise HTTPException(400, "缺少 prompt 参数")
@@ -897,17 +951,24 @@ def create_api_app() -> FastAPI:
         ]
 
         try:
+            from .ai.client import AIClientError
             resp = client.chat(messages, temperature=0.7)
-            content = resp["choices"][0]["message"]["content"].strip()
+            content = resp.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+            if not content:
+                return {"content": "(AI 返回了空内容)", "role": "assistant"}
             return {"content": content, "role": "assistant"}
+        except AIClientError as e:
+            _server_log(f"AI chat 错误 [{e.code}]: {e}", "ERROR")
+            raise HTTPException(500, f"AI 调用失败: {e}") from None
         except Exception as e:
-            raise HTTPException(500, str(e)) from None
+            _server_log(f"AI chat 未知错误: {e}", "ERROR")
+            raise HTTPException(500, f"AI 调用异常: {e}") from None
 
     @app.post("/api/chat/stream")
     async def chat_stream(req: Request):
         body = await req.json()
         prompt = body.get("prompt", "").strip()
-        context = body.get("context", [])
+        context = _validate_context(body.get("context", []))
 
         if not prompt:
             raise HTTPException(400, "缺少 prompt 参数")
@@ -929,7 +990,126 @@ def create_api_app() -> FastAPI:
                     yield f"data: {json.dumps({'token': token})}\n\n"
                 yield "data: [DONE]\n\n"
             except Exception as e:
-                yield f"data: {json.dumps({'error': str(e)})}\n\n"
+                from .ai.client import AIClientError
+                if isinstance(e, AIClientError):
+                    yield f"data: {json.dumps({'error': str(e), 'code': getattr(e, 'code', 'unknown')})}\n\n"
+                else:
+                    yield f"data: {json.dumps({'error': str(e), 'code': 'unknown'})}\n\n"
+                yield "data: [DONE]\n\n"
+
+        return StreamingResponse(
+            generate(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
+    # ── AI 路线规划 (非交互式) ──────────────────────────────────────
+
+    @app.post("/api/ai/route")
+    async def ai_route(req: Request):
+        body = await req.json()
+        input_file = body.get("input_file", "").strip()
+        if not input_file:
+            raise HTTPException(400, "缺少 input_file 参数")
+
+        input_path = resolve_path(input_file)
+        if not input_path.exists():
+            raise HTTPException(404, f"文件不存在: {input_file}")
+
+        from .router import RouteWizard
+
+        params = {
+            "start_address": body.get("start_address", ""),
+            "start_point": body.get("start_point"),
+            "num_routes": min(10, max(1, int(body.get("num_routes", 3)))),
+            "travel_mode": body.get("travel_mode", "driving"),
+        }
+
+        wizard = RouteWizard(
+            csv_path=str(input_path),
+            map_path=str(OutputPaths.MAP / "路线规划_地图.html"),
+            headless=True,
+            params=params,
+        )
+        result = wizard.run()
+
+        return {"success": result, "message": "路线规划完成" if result else "路线规划失败"}
+
+    # ── AI 数据分析 (SSE 流式) ──────────────────────────────────────
+
+    @app.post("/api/ai/analyze/stream")
+    async def ai_analyze_stream(req: Request):
+        body = await req.json()
+        input_file = body.get("input_file", "").strip()
+        if not input_file:
+            raise HTTPException(400, "缺少 input_file 参数")
+
+        input_path = resolve_path(input_file)
+        if not input_path.exists():
+            raise HTTPException(404, f"文件不存在: {input_file}")
+
+        client = _get_ai_client()
+        if not client:
+            raise HTTPException(503, "AI 未启用或未配置 API Key")
+
+        import pandas as pd
+        try:
+            if str(input_path).endswith((".xlsx", ".xls")):
+                df = pd.read_excel(str(input_path))
+            else:
+                df = pd.read_csv(str(input_path), encoding="utf-8-sig")
+        except Exception as e:
+            raise HTTPException(400, f"读取文件失败: {e}")
+
+        status_col = _find_column(df, ["状态", "status", "State"])
+        if status_col and status_col in df.columns:
+            df = df[df[status_col] == "成功"]
+
+        if len(df) < 2:
+            raise HTTPException(400, "有效地址不足（至少需要2个）")
+
+        addr_col = _find_column(df, ["原始地址", "标准化地址", "original_address", "formatted_address"])
+        lat_col = _find_column(df, ["纬度", "latitude", "lat"])
+        lon_col = _find_column(df, ["经度", "longitude", "lng", "lon"])
+
+        addresses_summary = []
+        for _, row in df.head(50).iterrows():
+            addr = str(row.get(addr_col, "")) if addr_col else ""
+            lat = row.get(lat_col, "") if lat_col else ""
+            lon = row.get(lon_col, "") if lon_col else ""
+            addresses_summary.append(f"- {addr}: ({lat}, {lon})")
+
+        prompt = (
+            f"请分析以下 {len(addresses_summary)} 个地址的地理分布特征:\n\n"
+            + "\n".join(addresses_summary)
+            + "\n\n请从以下维度分析:\n"
+            "1. 地理分布概况（城市/区域分布）\n"
+            "2. 密度特征（集中/分散）\n"
+            "3. 出行建议（如何分组访问效率最高）\n"
+            "4. 异常点识别（位置明显偏离的点）\n"
+        )
+
+        messages = [
+            {"role": "system", "content": "你是地理数据分析专家。请用中文回答。"},
+            {"role": "user", "content": prompt},
+        ]
+
+        async def generate():
+            try:
+                for token in client.chat_stream(messages, temperature=0.7):
+                    yield f"data: {json.dumps({'token': token})}\n\n"
+                yield "data: [DONE]\n\n"
+            except Exception as e:
+                from .ai.client import AIClientError
+                if isinstance(e, AIClientError):
+                    yield f"data: {json.dumps({'error': str(e), 'code': getattr(e, 'code', 'unknown')})}\n\n"
+                else:
+                    yield f"data: {json.dumps({'error': str(e), 'code': 'unknown'})}\n\n"
+                yield "data: [DONE]\n\n"
 
         return StreamingResponse(
             generate(),

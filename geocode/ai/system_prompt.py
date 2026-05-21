@@ -3,11 +3,17 @@
 
 为 AI 提供完整上下文：所有可用命令、参数、输出格式、data/文件列表、输出目录结构。
 每次调用 build_system_prompt() 时动态生成，确保信息始终是最新的。
+内置简单缓存避免高频请求时反复扫描文件系统。
 """
 
-from pathlib import Path
+import logging
 
-from ..config import Config, PROJECT_DIR, OutputPaths
+from ..config import PROJECT_DIR, Config, OutputPaths
+
+logger = logging.getLogger(__name__)
+
+_prompt_cache: dict = {"content": "", "hash": "", "timestamp": 0}
+_CACHE_TTL = 30
 
 
 # ── 命令详情 ──────────────────────────────────────────────────────
@@ -139,13 +145,17 @@ def _build_data_files_context() -> str:
     """扫描 data/ 目录，列出可处理文件"""
     data_dir = PROJECT_DIR / "data"
     lines = ["## 当前可处理的数据文件\n"]
-    if not data_dir.exists():
-        lines.append("(data/ 目录不存在)")
-        return "\n".join(lines)
+    try:
+        if not data_dir.exists():
+            lines.append("(data/ 目录不存在)")
+            return "\n".join(lines)
 
-    files = sorted(data_dir.iterdir())
-    xlsx_files = [f.name for f in files if f.suffix.lower() in (".xlsx", ".xls")]
-    csv_files = [f.name for f in files if f.suffix.lower() == ".csv"]
+        files = sorted(data_dir.iterdir())
+        xlsx_files = [f.name for f in files if f.suffix.lower() in (".xlsx", ".xls")]
+        csv_files = [f.name for f in files if f.suffix.lower() == ".csv"]
+    except PermissionError:
+        lines.append("(无法访问 data/ 目录)")
+        return "\n".join(lines)
 
     if xlsx_files:
         lines.append("**Excel 文件**:")
@@ -174,7 +184,6 @@ def _build_api_status() -> str:
 
 def _build_cmd_protocol() -> str:
     """生成 [CMD] 协议说明"""
-    exe = f"{OutputPaths.MAP / 'output文件_map.html'}"
     return (
         "## 命令执行协议\n\n"
         "你是一个能**直接执行命令**的 Agent。当需要完成操作时，用以下格式包裹命令:\n\n"
@@ -221,11 +230,15 @@ def _build_output_maps_context() -> str:
     """扫描 output/map/ 目录，列出已生成的地图 HTML 文件"""
     map_dir = OutputPaths.MAP
     lines = ["## 已生成的地图文件\n"]
-    if not map_dir.exists():
-        lines.append("(output/map/ 目录尚不存在 — 请先运行 geocode batch 生成地图)")
-        return "\n".join(lines)
+    try:
+        if not map_dir.exists():
+            lines.append("(output/map/ 目录尚不存在 — 请先运行 geocode batch 生成地图)")
+            return "\n".join(lines)
 
-    html_files = sorted(map_dir.glob("*.html"), key=lambda x: x.stat().st_mtime, reverse=True)
+        html_files = sorted(map_dir.glob("*.html"), key=lambda x: x.stat().st_mtime, reverse=True)
+    except PermissionError:
+        lines.append("(无法访问 output/map/ 目录)")
+        return "\n".join(lines)
     if not html_files:
         lines.append("(暂无地图文件 — 请先运行 geocode batch 生成地图)")
     else:

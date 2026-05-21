@@ -236,6 +236,8 @@ export async function fetchDataFiles(
 }
 
 // ── AI 聊天 (SSE 流式) ──
+const SSE_CHUNK_TIMEOUT_MS = 30_000
+
 export function chatStream(
   prompt: string,
   context: ChatMessage[],
@@ -244,58 +246,79 @@ export function chatStream(
   onError: (error: string) => void,
   signal?: AbortSignal
 ): void {
-  const url = `${API_BASE}/api/chat/stream`;
+  const url = `${API_BASE}/api/chat/stream`
+  const controller = signal ? undefined : new AbortController()
+  const abortSignal = signal || controller?.signal
+
+  let lastChunkTime = Date.now()
+  let chunkTimer: ReturnType<typeof setInterval> | null = null
+
+  if (!signal) {
+    chunkTimer = setInterval(() => {
+      if (Date.now() - lastChunkTime > SSE_CHUNK_TIMEOUT_MS) {
+        onError('AI 响应超时，请检查网络连接后重试')
+        if (controller) controller.abort()
+        if (chunkTimer) clearInterval(chunkTimer)
+      }
+    }, 5000)
+  }
+
   fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ prompt, context }),
-    signal,
+    signal: abortSignal,
   })
     .then(async (res) => {
       if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
-        onError(body.error || '请求失败');
-        return;
+        const body = await res.json().catch(() => ({}))
+        onError(body.error || body.detail || `请求失败 (HTTP ${res.status})`)
+        return
       }
-      const reader = res.body?.getReader();
+      const reader = res.body?.getReader()
       if (!reader) {
-        onError('浏览器不支持流式读取');
-        return;
+        onError('浏览器不支持流式读取')
+        return
       }
-      const decoder = new TextDecoder();
-      let buffer = '';
+      const decoder = new TextDecoder()
+      let buffer = ''
       while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop() || '';
+        const { done, value } = await reader.read()
+        if (done) break
+        lastChunkTime = Date.now()
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split('\n')
+        buffer = lines.pop() || ''
         for (const line of lines) {
-          const trimmed = line.trim();
-          if (!trimmed || !trimmed.startsWith('data: ')) continue;
-          const data = trimmed.slice(6);
+          const trimmed = line.trim()
+          if (!trimmed || !trimmed.startsWith('data: ')) continue
+          const data = trimmed.slice(6)
           if (data === '[DONE]') {
-            onComplete();
-            return;
+            if (chunkTimer) clearInterval(chunkTimer)
+            onComplete()
+            return
           }
           try {
-            const parsed = JSON.parse(data);
+            const parsed = JSON.parse(data)
             if (parsed.error) {
-              onError(parsed.error);
-              return;
+              if (chunkTimer) clearInterval(chunkTimer)
+              onError(parsed.error)
+              return
             }
-            if (parsed.token) onToken(parsed.token);
+            if (parsed.token) onToken(parsed.token)
           } catch {
             // skip
           }
         }
       }
-      onComplete();
+      if (chunkTimer) clearInterval(chunkTimer)
+      onComplete()
     })
     .catch((e) => {
-      if (e.name === 'AbortError') return;
-      onError(e.message || '网络错误');
-    });
+      if (chunkTimer) clearInterval(chunkTimer)
+      if (e.name === 'AbortError') return
+      onError(e.message || '网络错误')
+    })
 }
 
 // ── AI 命令执行 ──
@@ -432,4 +455,83 @@ export async function deleteTask(
   signal?: AbortSignal
 ): Promise<{ success: boolean; message: string }> {
   return request(`/api/tasks/${taskId}`, { method: 'DELETE' }, signal);
+}
+
+// ── AI 路线规划 (非交互式) ──
+export async function aiRoute(
+  params: {
+    input_file: string;
+    num_routes?: number;
+    travel_mode?: string;
+    start_address?: string;
+    start_point?: { lat: number; lon: number };
+  },
+  signal?: AbortSignal
+): Promise<{ success: boolean; message: string }> {
+  return request('/api/ai/route', {
+    method: 'POST',
+    body: JSON.stringify(params),
+  }, signal);
+}
+
+// ── AI 数据分析 (SSE 流式) ──
+export function aiAnalyzeStream(
+  inputFile: string,
+  onToken: (token: string) => void,
+  onComplete: () => void,
+  onError: (error: string) => void,
+  signal?: AbortSignal
+): void {
+  const url = `${API_BASE}/api/ai/analyze/stream`
+  fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ input_file: inputFile }),
+    signal,
+  })
+    .then(async (res) => {
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}))
+        onError(body.error || body.detail || `请求失败 (HTTP ${res.status})`)
+        return
+      }
+      const reader = res.body?.getReader()
+      if (!reader) {
+        onError('浏览器不支持流式读取')
+        return
+      }
+      const decoder = new TextDecoder()
+      let buffer = ''
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split('\n')
+        buffer = lines.pop() || ''
+        for (const line of lines) {
+          const trimmed = line.trim()
+          if (!trimmed || !trimmed.startsWith('data: ')) continue
+          const data = trimmed.slice(6)
+          if (data === '[DONE]') {
+            onComplete()
+            return
+          }
+          try {
+            const parsed = JSON.parse(data)
+            if (parsed.error) {
+              onError(parsed.error)
+              return
+            }
+            if (parsed.token) onToken(parsed.token)
+          } catch {
+            // skip
+          }
+        }
+      }
+      onComplete()
+    })
+    .catch((e) => {
+      if (e.name === 'AbortError') return
+      onError(e.message || '网络错误')
+    })
 }

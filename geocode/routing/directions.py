@@ -5,6 +5,7 @@
 复用项目已有的 API 密钥和 HTTP Session 模式。
 """
 
+import logging
 import time
 from typing import Dict, List, Optional, Tuple
 
@@ -12,9 +13,10 @@ import requests
 from requests.adapters import HTTPAdapter
 
 from geocode.config import Config
-from .models import (
-    TravelMode, RoutePoint, RouteSegment, RouteResult
-)
+
+from .models import RoutePoint, RouteResult, RouteSegment
+
+logger = logging.getLogger(__name__)
 
 
 class DirectionsClient:
@@ -120,11 +122,13 @@ class DirectionsClient:
     def _parse_amap_route(self, data: Dict, mode: str) -> Optional[RouteResult]:
         """解析高德 API 响应"""
         if data.get("status") != "1" or not data.get("route"):
+            logger.warning("高德 API 返回非成功状态: status=%s, info=%s", data.get("status"), data.get("info", ""))
             return None
 
         route = data["route"]
         paths = route.get("paths", [])
         if not paths:
+            logger.info("高德 API 返回空路径列表")
             return None
 
         main_path = paths[0]
@@ -193,11 +197,13 @@ class DirectionsClient:
     def _parse_baidu_route(self, data: Dict, mode: str) -> Optional[RouteResult]:
         """解析百度 API 响应"""
         if data.get("status") != 0:
+            logger.warning("百度 API 返回非成功状态: status=%s, message=%s", data.get("status"), data.get("message", ""))
             return None
 
         result_data = data.get("result", {})
         routes = result_data.get("routes", [])
         if not routes:
+            logger.info("百度 API 返回空路线列表")
             return None
 
         main_route = routes[0]

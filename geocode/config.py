@@ -265,16 +265,20 @@ class Config:
 
             provider = get_provider(cls.AI_PROVIDER)
             if not provider:
+                import logging
+                logging.getLogger(__name__).warning("AI 供应商 '%s' 未找到配置", cls.AI_PROVIDER)
                 return None
             api_key = os.getenv(provider.api_key_env, "")
             if not api_key:
+                import logging
+                logging.getLogger(__name__).warning("AI 供应商 '%s' 的 API Key 未配置 (%s)", provider.display_name, provider.api_key_env)
                 return None
 
-            # 模型名校验：不在已知列表中时回退到默认模型
             model = cls.AI_MODEL or None
             if model and provider.available_models:
                 if model not in provider.available_models:
-                    print(f"[WARN] 模型 '{model}' 不在 {provider.display_name} 的已知列表中，回退到默认 '{provider.default_model}'")
+                    import logging
+                    logging.getLogger(__name__).warning("模型 '%s' 不在 %s 的已知列表中，回退到默认 '%s'", model, provider.display_name, provider.default_model)
                     model = None
 
             return AIClient(
@@ -282,7 +286,13 @@ class Config:
                 api_key=api_key,
                 model=model,
             )
-        except Exception:
+        except ValueError as e:
+            import logging
+            logging.getLogger(__name__).warning("AI 客户端配置错误: %s", e)
+            return None
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).error("AI 客户端创建失败: %s", e)
             return None
 
     @classmethod

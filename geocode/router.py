@@ -9,14 +9,14 @@ import json
 import re
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
 from geocode.ai import AIClient
-from geocode.config import Config, PROJECT_DIR
+from geocode.config import PROJECT_DIR, Config
 from geocode.coords import haversine_km
 from geocode.map_visualizer import create_map_with_routes
 
@@ -35,9 +35,12 @@ class RouteWizard:
     Usage:
         wizard = RouteWizard("output/地址_经纬度_结果.csv")
         wizard.run()          # 完整交互流程
+
+        # Headless 模式（通过 API 调用）
+        wizard = RouteWizard("output/结果.csv", headless=True, params={...})
+        wizard.run()
     """
 
-    # 出行方式选项
     TRAVEL_MODES = [
         ("driving", "驾车"),
         ("transit", "公交"),
@@ -45,16 +48,14 @@ class RouteWizard:
         ("bicycling", "骑行"),
     ]
 
-    def __init__(self, csv_path: str, map_path: Optional[str] = None):
-        """
-        Args:
-            csv_path: run 输出的地址经纬度结果文件路径
-            map_path: 输出地图路径（默认 output/路线规划_地图.html）
-        """
+    def __init__(self, csv_path: str, map_path: Optional[str] = None,
+                 headless: bool = False, params: Optional[Dict] = None):
         self.csv_path = Path(csv_path)
         self.map_path = Path(map_path or str(PROJECT_DIR / "output" / "路线规划_地图.html"))
         self.locations: List[Dict] = []
         self.ai_client: Optional[AIClient] = None
+        self.headless = headless
+        self.headless_params = params or {}
 
     # ==================== 公开入口 ====================
 
@@ -87,7 +88,7 @@ class RouteWizard:
 
             # 5. 输出地图
             map_path = self._output_map(routes, params.get("start_point"))
-            console.print(f"\n[green][OK] 路线规划完成！[/green]")
+            console.print("\n[green][OK] 路线规划完成！[/green]")
             console.print(f"  [cyan]地图:[/cyan] {map_path}")
             return True
 
@@ -111,7 +112,7 @@ class RouteWizard:
 
         raw = None
         try:
-            with open(self.csv_path, "r", encoding="utf-8-sig") as f:
+            with open(self.csv_path, encoding="utf-8-sig") as f:
                 first_char = f.read(1)
                 f.seek(0)
                 if first_char == "[":
@@ -158,7 +159,10 @@ class RouteWizard:
     # ==================== 交互式参数收集 ====================
 
     def _interactive_prompt(self) -> Optional[Dict]:
-        """交互式询问规划参数"""
+        """交互式询问规划参数（headless 模式直接返回预设参数）"""
+        if self.headless:
+            return self.headless_params
+
         params = {}
 
         # ----- 总起点 -----
