@@ -1,13 +1,22 @@
 import { useQuery } from '@tanstack/react-query'
-import { fetchMapFiles, getMapViewUrl } from '../../lib/api'
+import { fetchMapFiles, getMapViewUrl, openDirectory } from '../../lib/api'
 import { formatFileSize, formatDate } from '../../lib/utils'
-import { ExternalLink, RefreshCw, Loader2, Globe } from 'lucide-react'
+import { ExternalLink, RefreshCw, Loader2, Globe, FolderOpen } from 'lucide-react'
+import { toast } from 'sonner'
 
 export default function MapFileList() {
   const { data: files, isLoading, isError, error, refetch } = useQuery({
     queryKey: ['mapFiles'],
     queryFn: ({ signal }) => fetchMapFiles(signal),
   })
+
+  const handleOpenDir = async () => {
+    try {
+      await openDirectory('output/map')
+    } catch (e: any) {
+      toast.error(e.message || '无法打开目录')
+    }
+  }
 
   return (
     <div className="card">
@@ -16,9 +25,14 @@ export default function MapFileList() {
           <h3 className="card-title" style={{ marginBottom: 4 }}><i className="fa-solid fa-map" /> 地图文件列表</h3>
           <p className="card-desc">output/map 目录中的 HTML 地图文件，点击阅览在新标签页打开</p>
         </div>
-        <button onClick={() => refetch()} className="btn btn-secondary btn-sm">
-          <RefreshCw size={14} /> 刷新
-        </button>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button onClick={handleOpenDir} className="btn btn-secondary btn-sm" title="在文件资源管理器中打开 output/map 目录">
+            <FolderOpen size={14} /> 打开目录
+          </button>
+          <button onClick={() => refetch()} className="btn btn-secondary btn-sm">
+            <RefreshCw size={14} /> 刷新
+          </button>
+        </div>
       </div>
 
       {isLoading && (

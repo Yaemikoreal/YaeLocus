@@ -27,7 +27,9 @@ export default function AIPage() {
         ))}
       </div>
 
-      {tab === 'chat' && <ChatPanel />}
+      <div style={{ display: tab === 'chat' ? 'flex' : 'none', flexDirection: 'column', flex: 1, height: '100%' }}>
+        <ChatPanel />
+      </div>
       {tab === 'analyze' && <AnalysisResult />}
       {tab === 'route' && <RoutePlan />}
     </div>

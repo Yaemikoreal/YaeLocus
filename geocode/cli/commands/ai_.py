@@ -87,12 +87,20 @@ def chat(
     try:
         if stream:
             full_text = ""
+            full_reasoning = ""
             console.print("[cyan]● AI 思考中...[/cyan]", end="")
-            for token in client.chat_stream(messages=messages, temperature=0.7):
+            for chunk in client.chat_stream(messages=messages, temperature=0.7):
+                if isinstance(chunk, dict):
+                    text = chunk.get("content", "")
+                    if chunk.get("type") == "reasoning":
+                        full_reasoning += text
+                        continue
+                else:
+                    text = str(chunk)
                 if not full_text:
                     console.print("\r[cyan]● AI 回复:[/cyan]")
-                full_text += token
-                console.print(token, end="", highlight=False)
+                full_text += text
+                console.print(text, end="", highlight=False)
             console.print()
             answer = full_text.strip() if full_text else ""
             if not answer:
@@ -257,15 +265,23 @@ def analyze(
         if stream:
             console.print("[cyan]● AI 分析中...[/cyan]")
             full_text = ""
-            for token in client.chat_stream(
+            full_reasoning = ""
+            for chunk in client.chat_stream(
                 messages=[
                     {"role": "system", "content": "你是地理数据分析专家。请用中文回答。"},
                     {"role": "user", "content": prompt},
                 ],
                 temperature=0.7,
             ):
-                full_text += token
-                console.print(token, end="", highlight=False)
+                if isinstance(chunk, dict):
+                    text = chunk.get("content", "")
+                    if chunk.get("type") == "reasoning":
+                        full_reasoning += text
+                        continue
+                else:
+                    text = str(chunk)
+                full_text += text
+                console.print(text, end="", highlight=False)
             console.print()
             answer = full_text.strip() if full_text else ""
             if not answer:

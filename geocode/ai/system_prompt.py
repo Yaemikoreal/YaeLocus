@@ -226,6 +226,18 @@ def _build_usage_guide() -> str:
     )
 
 
+def _build_data_analysis_guide() -> str:
+    """数据分析指南"""
+    return (
+        "## 数据分析指南\n\n"
+        "当用户要求分析某个数据文件（如'德阳_0519_经开直属'）时:\n"
+        "1. 使用 `map list --detail` 确认文件存在和大小\n"
+        "2. 分析时应关注：地址数量、编码成功率、地理分布特征、异常值\n"
+        "3. **给出明确的分析结论**，不要只罗列命令输出\n"
+        "4. 如果数据量较大，指出关键统计指标而非逐条列举\n"
+    )
+
+
 def _build_output_maps_context() -> str:
     """扫描 output/map/ 目录，列出已生成的地图 HTML 文件"""
     map_dir = OutputPaths.MAP
@@ -269,6 +281,7 @@ def build_system_prompt(include_data_files: bool = True) -> str:
         _build_output_structure(),
         _build_api_status(),
         _build_usage_guide(),
+        _build_data_analysis_guide(),
         _build_output_maps_context(),
     ]
     if include_data_files:

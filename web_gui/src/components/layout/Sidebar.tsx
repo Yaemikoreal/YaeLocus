@@ -2,20 +2,20 @@ import { NavLink, useLocation } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { fetchHealth } from '../../lib/api'
 
-const NAV_SECTIONS = [
+const NAV_SECTIONS: { title: string; badge?: string; items: { to: string; label: string; icon: string; end?: boolean; badge?: string }[] }[] = [
   {
     title: '核心功能',
     items: [
       { to: '/', label: '地理编码', icon: 'fa-solid fa-location-dot', end: true },
       { to: '/batch', label: '批量处理', icon: 'fa-solid fa-layer-group', badge: 'Pro' },
       { to: '/convert', label: '坐标转换', icon: 'fa-solid fa-arrows-rotate' },
-      { to: '/map', label: '地图可视化', icon: 'fa-solid fa-map' },
     ],
   },
   {
     title: '智能分析',
+    badge: 'Beta',
     items: [
-      { to: '/ai', label: 'AI 对话', icon: 'fa-solid fa-sparkles' },
+      { to: '/ai', label: 'AI 对话', icon: 'fa-solid fa-wand-magic-sparkles' },
       { to: '/route', label: '路线规划', icon: 'fa-solid fa-route' },
       { to: '/optimize', label: '行程优化', icon: 'fa-solid fa-diagram-project' },
     ],
@@ -75,7 +75,10 @@ export default function Sidebar({ mobileOpen, onClose }: SidebarProps) {
         <nav className="sidebar-nav">
           {NAV_SECTIONS.map((section) => (
             <div key={section.title}>
-              <div className="nav-section-title">{section.title}</div>
+              <div className="nav-section-title">
+                {section.title}
+                {section.badge && <span className="nav-beta">{section.badge}</span>}
+              </div>
               {section.items.map((item) => {
                 const isActive = item.end
                   ? location.pathname === '/'

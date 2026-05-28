@@ -2,38 +2,86 @@
 地理编码核心模块
 
 支持高德、天地图、百度三个API的智能轮换
+并发三路API调用 + 置信度交叉验证优化
 """
 
+import logging
 import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import requests
 from requests.adapters import HTTPAdapter
 
 from .cache import CacheManager
 from .config import Config
-from .coords import gcj02_to_wgs84, bd09_to_wgs84
+from .coords import bd09_to_wgs84, gcj02_to_wgs84
 from .logger import APILogger
 from .models import GeocodeResult
-from .preprocessing import InvalidAddressFilter, AddressNormalizer, AddressSplitter
+from .preprocessing import AddressNormalizer, AddressSplitter, InvalidAddressFilter
 from .validation import ConfidenceValidator
+
+logger = logging.getLogger(__name__)
+
+
+class _TokenBucketRateLimiter:
+    """令牌桶限流器 + 信号量并发控制。
+
+    各 API 独立限流，不阻塞其他线程的令牌获取。
+    对配置了最大并发的 API（如百度），使用信号量控制同时进行的请求数。
+    """
+
+    def __init__(self, qps: Dict[str, float], max_concurrent: Dict[str, int] = None):
+        self._qps = qps
+        self._last_request: Dict[str, float] = {}
+        self._lock = threading.Lock()
+        self._semaphores: Dict[str, threading.Semaphore] = {}
+        if max_concurrent:
+            for api_name, limit in max_concurrent.items():
+                if limit and limit > 0:
+                    self._semaphores[api_name] = threading.Semaphore(limit)
+
+    def acquire(self, api_name: str) -> None:
+        sem = self._semaphores.get(api_name)
+        if sem:
+            sem.acquire()
+
+        min_interval = 1.0 / (self._qps.get(api_name, 5) or 5)
+
+        with self._lock:
+            last = self._last_request.get(api_name, 0)
+            now = time.monotonic()
+            wait = min_interval - (now - last)
+            if wait > 0:
+                release_at = now + wait
+                self._last_request[api_name] = release_at
+            else:
+                release_at = now
+                self._last_request[api_name] = now
+
+        sleep_time = release_at - time.monotonic()
+        if sleep_time > 0:
+            time.sleep(sleep_time)
+
+    def release(self, api_name: str) -> None:
+        sem = self._semaphores.get(api_name)
+        if sem:
+            sem.release()
 
 
 class Geocoder:
     """
     地理编码器
 
-    支持多API轮换、智能缓存、限流控制、HTTP连接复用、重试机制
+    支持多API并发轮换、智能缓存、限流控制、HTTP连接复用、重试机制
     """
 
-    # 各 API 的每秒最大并发请求数（尊重免费配额）
     _API_RATE_LIMITS = {
-        "amap": 5,       # 高德: 5 QPS
-        "tianditu": 10,  # 天地图: 10 QPS
-        "baidu": 5,      # 百度: 5 QPS
+        "amap": 5,
+        "tianditu": 10,
+        "baidu": 5,
     }
 
     def __init__(
@@ -42,14 +90,6 @@ class Geocoder:
         api_logger: APILogger = None,
         cache_ttl: float = None
     ):
-        """
-        初始化地理编码器
-
-        Args:
-            cache_manager: 缓存管理器
-            api_logger: API日志记录器
-            cache_ttl: 缓存过期时间(秒)，None表示永不过期
-        """
         self.cache = cache_manager if cache_manager is not None else CacheManager()
         self.logger = api_logger if api_logger is not None else APILogger()
         self._cache_ttl = cache_ttl
@@ -57,46 +97,25 @@ class Geocoder:
         self._success_count = 0
         self._counter_lock = threading.Lock()
 
-        # 各 API 独立限流状态
-        self._api_last_request: Dict[str, float] = {}
-        self._api_locks: Dict[str, threading.Lock] = {}
+        self._rate_limiter = _TokenBucketRateLimiter(self._API_RATE_LIMITS, Config.API_MAX_CONCURRENT)
 
-        # 预处理和验证组件 — 单例化避免重复 I/O
         self.normalizer = AddressNormalizer()
         self.filter_obj = InvalidAddressFilter()
         self.splitter = AddressSplitter()
         self.validator = ConfidenceValidator()
 
-        # 各 API 限流信号量
-        self._api_semaphores = {
-            name: threading.BoundedSemaphore(limit)
-            for name, limit in self._API_RATE_LIMITS.items()
-        }
-
-        # HTTP Session 复用（性能优化）
         self._session = requests.Session()
         adapter = HTTPAdapter(
             pool_connections=10,
             pool_maxsize=20,
-            max_retries=0  # 重试逻辑在内部实现
+            max_retries=0
         )
         self._session.mount('http://', adapter)
         self._session.mount('https://', adapter)
 
     def _rate_limit(self, api_name: str = "amap") -> None:
-        """各 API 独立请求限流"""
-        if api_name not in self._api_locks:
-            self._api_locks[api_name] = threading.Lock()
-        lock = self._api_locks[api_name]
-
-        min_interval = 1.0 / self._API_RATE_LIMITS.get(api_name, 5)
-
-        with lock:
-            if api_name in self._api_last_request:
-                elapsed = time.time() - self._api_last_request[api_name]
-                if elapsed < min_interval:
-                    time.sleep(min_interval - elapsed)
-            self._api_last_request[api_name] = time.time()
+        """令牌桶限流：精确等待，不阻塞其他线程"""
+        self._rate_limiter.acquire(api_name)
 
     def _api_call_with_retry(
         self,
@@ -105,33 +124,25 @@ class Geocoder:
         api_name: str = "amap",
         max_retries: int = 3
     ) -> Optional[requests.Response]:
-        """
-        带重试的 API 调用
+        """带重试的 API 调用，含信号量并发控制
 
         仅对网络错误重试，不对 API 返回错误重试
-
-        Args:
-            url: API 端点 URL
-            params: 请求参数
-            api_name: API 名称，用于限流
-            max_retries: 最大重试次数
-
-        Returns:
-            Response 对象或 None
         """
-        retry_delay = 1.0
-
-        for attempt in range(max_retries):
-            try:
-                self._rate_limit(api_name)
-                response = self._session.get(url, params=params, timeout=Config.REQUEST_TIMEOUT)
-                return response
-            except (requests.Timeout, requests.ConnectionError):
-                if attempt < max_retries - 1:
-                    time.sleep(retry_delay * (2 ** attempt))
-                else:
-                    raise
-        return None
+        self._rate_limit(api_name)
+        try:
+            retry_delay = 1.0
+            for attempt in range(max_retries):
+                try:
+                    response = self._session.get(url, params=params, timeout=Config.REQUEST_TIMEOUT)
+                    return response
+                except (requests.Timeout, requests.ConnectionError):
+                    if attempt < max_retries - 1:
+                        time.sleep(retry_delay * (2 ** attempt))
+                    else:
+                        raise
+            return None
+        finally:
+            self._rate_limiter.release(api_name)
 
     def _build_result(
         self,
@@ -389,16 +400,232 @@ class Geocoder:
             "confidence": {"total": 0, "issues": ["All APIs failed"], "is_trustworthy": False}
         }
 
-    def batch_geocode(
-        self, addresses: List[str], progress: bool = True, workers: int = 3
-    ) -> List[Dict]:
+    def _call_single_api(self, api_name: str, address: str) -> Tuple[str, Optional[Dict]]:
+        """调用单个 API，返回 (api_name, result_dict 或 None)"""
+        method = getattr(self, f"_geocode_{api_name}", None)
+        if method is None:
+            return (api_name, None)
+        try:
+            result = method(address)
+            if result and result.success:
+                return (api_name, result.to_dict())
+            return (api_name, None)
+        except Exception as e:
+            logger.debug("API %s 调用异常: %s", api_name, e)
+            return (api_name, None)
+
+    def _cross_validate(
+        self,
+        results: List[Tuple[str, Dict]],
+        original_address: str,
+    ) -> Optional[Dict]:
+        """交叉验证多个 API 结果，选择最优结果
+
+        策略:
+        1. 按置信度从高到低排序
+        2. 如果最优结果置信度 >= 阈值，直接返回
+        3. 如果多个结果的坐标偏差 < 阈值，合并来源标记，返回最高置信度的
+        4. 如果坐标偏差 >= 阈值（>1km），返回置信度最高且在中国的
         """
-        批量地理编码（并行处理）
+        if not results:
+            return None
+
+        threshold = Config.CROSS_VALIDATE_THRESHOLD
+        max_delta = Config.CROSS_VALIDATE_MAX_COORD_DELTA
+
+        scored = []
+        for api_name, result_dict in results:
+            confidence = self.validator.validate(original_address, result_dict, None)
+            result_dict["confidence"] = {
+                "total": confidence.total,
+                "issues": confidence.issues,
+                "is_trustworthy": confidence.is_trustworthy,
+            }
+            if not confidence.is_trustworthy:
+                result_dict["warning"] = "置信度较低，建议人工核实"
+            scored.append((confidence.total, api_name, result_dict, confidence))
+
+        scored.sort(key=lambda x: x[0], reverse=True)
+
+        best_score, best_api, best_result, best_conf = scored[0]
+
+        if best_score >= threshold:
+            best_result["sources"] = [best_api]
+            best_result["cross_validated"] = True
+            return best_result
+
+        if len(scored) > 1:
+            best_lat = best_result.get("latitude", 0)
+            best_lon = best_result.get("longitude", 0)
+
+            consistent_sources = [best_api]
+            for _score, api_name, result_dict, _conf in scored[1:]:
+                lat = result_dict.get("latitude", 0)
+                lon = result_dict.get("longitude", 0)
+                if lat and lon and best_lat and best_lon:
+                    from .coords import haversine_km
+                    dist_km = haversine_km(best_lat, best_lon, lat, lon)
+                    if dist_km < max_delta:
+                        consistent_sources.append(api_name)
+
+            best_result["sources"] = consistent_sources
+            best_result["cross_validated"] = len(consistent_sources) > 1
+
+            if best_score < threshold and len(consistent_sources) <= 1:
+                all_sources = [s[1] for s in scored if s[3].is_trustworthy or s[0] >= 40]
+                if all_sources:
+                    best_result["sources"] = all_sources
+                    best_result["cross_validated"] = True
+                    best_result["warning"] = f"置信度较低({best_score}分)，多源对比中仅{len(consistent_sources)}个结果一致，建议人工核实"
+
+        else:
+            best_result["sources"] = [best_api]
+            best_result["cross_validated"] = False
+
+        return best_result
+
+    def geocode_parallel(self, address: str) -> Dict:
+        """并发三路 API 地理编码 + 置信度交叉验证
+
+        策略:
+        - 同时向高德、天地图、百度发起请求（各 API 独立限流）
+        - 取首个成功结果立即返回（如果置信度 >= 阈值）
+        - 置信度 < 阈值时，等待其他 API 结果做交叉验证
+        - 缓存命中时直接返回，不走 API
+
+        Args:
+            address: 地址字符串
+
+        Returns:
+            地理编码结果字典（含 confidence 和 cross_validated 字段）
+        """
+        if not Config.PARALLEL_APIS:
+            return self.geocode(address)
+
+        is_valid, reason = self.filter_obj.is_valid(address)
+        if not is_valid:
+            return {
+                "success": False,
+                "original_address": str(address),
+                "error": f"无效地址: {reason}",
+                "confidence": {"total": 0, "issues": [reason], "is_trustworthy": False}
+            }
+
+        split_result = self.splitter.split(str(address))
+        address_part = split_result["address"]
+
+        if not address_part or not address_part.strip():
+            return {"success": False, "original_address": str(address), "error": "Empty address after split"}
+
+        normalized, meta = self.normalizer.normalize(address_part)
+
+        if not normalized or not normalized.strip():
+            return {"success": False, "original_address": str(address), "error": "Empty address"}
+
+        with self._counter_lock:
+            self._request_count += 1
+
+        cached = self.cache.get(normalized)
+        if cached is not None:
+            if "confidence" not in cached:
+                cached["confidence"] = {"total": 100, "issues": [], "is_trustworthy": True}
+            if "cross_validated" not in cached:
+                cached["cross_validated"] = False
+            return cached
+
+        threshold = Config.CROSS_VALIDATE_THRESHOLD
+        timeout = Config.GEOCODE_PARALLEL_TIMEOUT
+
+        available_apis = []
+        for api_name in Config.API_PRIORITY:
+            if getattr(self, f"_geocode_{api_name}", None) is not None:
+                available_apis.append(api_name)
+
+        if not available_apis:
+            return {
+                "success": False,
+                "original_address": str(address),
+                "normalized_address": normalized,
+                "error": "No API key configured",
+                "confidence": {"total": 0, "issues": ["No API key configured"], "is_trustworthy": False}
+            }
+
+        results: List[Tuple[str, Dict]] = []
+        first_result: Optional[Dict] = None
+        first_api: Optional[str] = None
+
+        with ThreadPoolExecutor(max_workers=min(3, len(available_apis))) as executor:
+            futures = {
+                executor.submit(self._call_single_api, api_name, normalized): api_name
+                for api_name in available_apis
+            }
+
+            try:
+                for future in as_completed(futures, timeout=timeout):
+                    api_name = futures[future]
+                    try:
+                        api_name_result, result_dict = future.result()
+                    except Exception:
+                        continue
+
+                    if result_dict is not None:
+                        with self._counter_lock:
+                            self._success_count += 1
+
+                        confidence = self.validator.validate(str(address), result_dict, None)
+                        result_dict["confidence"] = {
+                            "total": confidence.total,
+                            "issues": confidence.issues,
+                            "is_trustworthy": confidence.is_trustworthy,
+                        }
+                        if not confidence.is_trustworthy:
+                            result_dict["warning"] = "置信度较低，建议人工核实"
+
+                        results.append((api_name_result, result_dict))
+
+                        if first_result is None:
+                            first_result = result_dict
+                            first_api = api_name_result
+
+                        if confidence.total >= threshold and len(results) >= 1:
+                            for f in futures:
+                                f.cancel()
+                            best = self._cross_validate(results, str(address)) or result_dict
+                            best["source"] = first_api
+                            self.cache.set(normalized, best, self._cache_ttl)
+                            return best
+
+            except Exception:
+                pass
+
+        if results:
+            best = self._cross_validate(results, str(address)) or results[0][1]
+            best["source"] = results[0][0]
+            self.cache.set(normalized, best, self._cache_ttl)
+            return best
+
+        return {
+            "success": False,
+            "original_address": str(address),
+            "normalized_address": normalized,
+            "error": "All APIs failed",
+            "confidence": {"total": 0, "issues": ["All APIs failed"], "is_trustworthy": False}
+        }
+
+    def batch_geocode(
+        self,
+        addresses: List[str],
+        progress: bool = True,
+        workers: int = 3,
+        parallel_apis: bool = True,
+    ) -> List[Dict]:
+        """批量地理编码（并行处理）
 
         Args:
             addresses: 地址列表
             progress: 是否显示进度条
             workers: 并行线程数，默认 3
+            parallel_apis: 是否启用并发三路 API 调用 + 交叉验证，默认 True
 
         Returns:
             结果列表（保持原始顺序）
@@ -408,7 +635,8 @@ class Geocoder:
 
         total = len(addresses)
 
-        # 少于 3 条不启用并行
+        geocode_func = self.geocode_parallel if parallel_apis else self.geocode
+
         if workers < 2 or total < 3:
             results = []
             iterator = addresses
@@ -419,24 +647,40 @@ class Geocoder:
                 except ImportError:
                     pass
             for address in iterator:
-                results.append(self.geocode(address))
+                results.append(geocode_func(address))
             self.cache.flush()
             self.logger.save()
             return results
 
+        cached_results = self.cache.get_batch_prefetch(addresses)
+        uncached_indices = []
+        uncached_addresses = []
+        for idx, addr in enumerate(addresses):
+            if cached_results.get(addr) is None:
+                uncached_indices.append(idx)
+                uncached_addresses.append(addr)
+
         results: List[Optional[Dict]] = [None] * total
+        for idx, addr in enumerate(addresses):
+            if cached_results.get(addr) is not None:
+                results[idx] = cached_results[addr]
+
+        if not uncached_addresses:
+            self.cache.flush()
+            self.logger.save()
+            return [r for r in results if r is not None]
 
         with ThreadPoolExecutor(max_workers=workers) as executor:
             futures = {
-                executor.submit(self.geocode, addr): idx
-                for idx, addr in enumerate(addresses)
+                executor.submit(geocode_func, addr): uncached_indices[i]
+                for i, addr in enumerate(uncached_addresses)
             }
 
             completed = 0
             if progress and not os.environ.get('YAELOCUS_TUI'):
                 try:
                     from tqdm import tqdm
-                    pbar = tqdm(total=total, desc="地理编码中", unit="条")
+                    pbar = tqdm(total=len(uncached_addresses), desc="地理编码中", unit="条")
                 except ImportError:
                     pbar = None
             else:
@@ -457,8 +701,8 @@ class Geocoder:
                 if pbar:
                     pbar.update(1)
 
-            if pbar:
-                pbar.close()
+        if pbar:
+            pbar.close()
 
         self.cache.flush()
         self.logger.save()

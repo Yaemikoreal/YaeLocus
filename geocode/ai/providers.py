@@ -35,9 +35,9 @@ BUILTIN_PROVIDERS = [
         name="deepseek",
         display_name="DeepSeek",
         base_url="https://api.deepseek.com",
-        default_model="deepseek-chat",
+        default_model="deepseek-v4-flash",
         api_key_env="DEEPSEEK_API_KEY",
-        available_models=["deepseek-chat", "deepseek-reasoner"],
+        available_models=["deepseek-v4-flash", "deepseek-chat", "deepseek-reasoner"],
     ),
     ProviderConfig(
         name="qwen",
@@ -45,7 +45,7 @@ BUILTIN_PROVIDERS = [
         base_url="https://dashscope.aliyuncs.com/compatible-mode",
         default_model="qwen-plus",
         api_key_env="QWEN_API_KEY",
-        available_models=["qwen-max", "qwen-plus", "qwen-turbo", "qwen-long"],
+        available_models=["qwen-max", "qwen-plus", "qwen-turbo", "qwen-long", "qwq-plus"],
     ),
     ProviderConfig(
         name="glm",
@@ -64,6 +64,20 @@ BUILTIN_PROVIDERS = [
         available_models=["moonshot-v1-8k", "moonshot-v1-32k", "moonshot-v1-128k"],
     ),
 ]
+
+REASONING_MODEL_PATTERNS = {
+    "deepseek": {"deepseek-reasoner", "deepseek-v4-flash"},
+    "qwen": {"qwq-plus", "qwq-max", "qwen-qwq"},
+    "glm": set(),
+    "moonshot": set(),
+}
+
+
+def is_reasoning_model(provider_name: str, model: str) -> bool:
+    patterns = REASONING_MODEL_PATTERNS.get(provider_name, set())
+    if model in patterns:
+        return True
+    return any(model.startswith(p) for p in patterns if p.endswith("-"))
 
 
 def get_provider(name: str) -> Optional[ProviderConfig]:

@@ -30,6 +30,7 @@ from . import __version__
 from .ai.client import AIClient
 from .ai.system_prompt import build_system_prompt
 from .cache import CacheManager
+from .chat import ChatManager
 from .cli.utils import resolve_path
 from .config import ENV_FILE, PROJECT_DIR, Config, OutputPaths
 from .db import DatabaseManager
@@ -55,6 +56,7 @@ def _server_log(msg: str, level: str = "INFO") -> None:
     print(f"[{ts}] {tag} {msg}", file=sys.stderr, flush=True)
 _geocoder: Optional[Geocoder] = None
 _ai_client: Optional[AIClient] = None
+_chat_manager: Optional[ChatManager] = None
 
 _tasks: dict = {}
 _tasks_lock = threading.Lock()
@@ -63,6 +65,13 @@ _cleanup_started = False
 
 def _get_db() -> DatabaseManager:
     return DatabaseManager.get_instance()
+
+
+def _get_chat_manager() -> ChatManager:
+    global _chat_manager
+    if _chat_manager is None:
+        _chat_manager = ChatManager()
+    return _chat_manager
 
 
 def _persist_task(task_id: str, task_data: dict) -> None:
@@ -656,21 +665,71 @@ def create_api_app() -> FastAPI:
                 total = len(addresses)
                 yield f"data: {json.dumps({'step': 'processing', 'label': '处理地址', 'status': 'running', 'total': total, 'current': 0, 'success': 0}, ensure_ascii=False)}\n\n"
 
-                results = []
-                success_count = 0
-                for i, addr in enumerate(addresses):
-                    result = geocoder.geocode(addr)
-                    results.append(result)
-                    if result.get("success"):
-                        success_count += 1
-                        if result.get("source"):
-                            _record_api_usage(result["source"], True)
+                use_parallel = workers != "1"
+                num_workers = 3 if use_parallel else 1
 
-                    yield f"data: {json.dumps({'type': 'geocode_result', 'index': i, 'data': result}, ensure_ascii=False)}\n\n"
+                cached_results = geocoder.cache.get_batch_prefetch(addresses)
+                uncached_indices = []
+                uncached_addresses = []
+                for idx, addr in enumerate(addresses):
+                    if cached_results.get(addr) is None:
+                        uncached_indices.append(idx)
+                        uncached_addresses.append(addr)
 
-                    if (i + 1) % 10 == 0 or i == total - 1:
-                        yield f"data: {json.dumps({'step': 'processing', 'label': '处理地址', 'status': 'running', 'total': total, 'current': i + 1, 'success': success_count}, ensure_ascii=False)}\n\n"
-                        _server_log(f"进度: {i + 1}/{total} ({success_count} 成功)")
+                results = [None] * total
+                for idx, addr in enumerate(addresses):
+                    if cached_results.get(addr) is not None:
+                        results[idx] = cached_results[addr]
+
+                success_count = sum(1 for r in results if r and r.get("success"))
+                cached_count = total - len(uncached_addresses)
+                if cached_count > 0:
+                    yield f"data: {json.dumps({'step': 'processing', 'label': f'缓存命中 {cached_count} 条', 'status': 'running', 'total': total, 'current': cached_count, 'success': success_count}, ensure_ascii=False)}\n\n"
+
+                geocode_func = geocoder.geocode_parallel if use_parallel else geocoder.geocode
+
+                if uncached_addresses:
+                    from concurrent.futures import ThreadPoolExecutor
+                    from concurrent.futures import as_completed as _as_completed
+
+                    with ThreadPoolExecutor(max_workers=num_workers) as executor:
+                        futures = {
+                            executor.submit(geocode_func, addr): uncached_indices[i]
+                            for i, addr in enumerate(uncached_addresses)
+                        }
+
+                        for future in _as_completed(futures):
+                            idx = futures[future]
+                            try:
+                                result = future.result()
+                                results[idx] = result
+                            except Exception as e:
+                                results[idx] = {
+                                    "success": False,
+                                    "original_address": addresses[idx],
+                                    "error": str(e),
+                                    "confidence": {"total": 0, "issues": [str(e)], "is_trustworthy": False}
+                                }
+
+                            if results[idx] and results[idx].get("success"):
+                                success_count += 1
+                                src = results[idx].get("source") or results[idx].get("sources", [""])[0] if results[idx].get("sources") else results[idx].get("source")
+                                if src:
+                                    _record_api_usage(src, True)
+
+                                sources = results[idx].get("sources", [])
+                                for src in sources:
+                                    if src:
+                                        _record_api_usage(src, True)
+                            elif results[idx] and results[idx].get("source"):
+                                _record_api_usage(results[idx]["source"], False)
+
+                            i = idx
+                            yield f"data: {json.dumps({'type': 'geocode_result', 'index': i, 'data': results[idx]}, ensure_ascii=False)}\n\n"
+
+                            done = sum(1 for r in results if r is not None)
+                            if done % 10 == 0 or done == total:
+                                yield f"data: {json.dumps({'step': 'processing', 'label': '处理地址', 'status': 'running', 'total': total, 'current': done, 'success': success_count}, ensure_ascii=False)}\n\n"
 
                 yield f"data: {json.dumps({'step': 'processing', 'label': '处理地址', 'status': 'done', 'total': total, 'success': success_count}, ensure_ascii=False)}\n\n"
 
@@ -969,6 +1028,7 @@ def create_api_app() -> FastAPI:
         body = await req.json()
         prompt = body.get("prompt", "").strip()
         context = _validate_context(body.get("context", []))
+        session_id = body.get("session_id")
 
         if not prompt:
             raise HTTPException(400, "缺少 prompt 参数")
@@ -976,6 +1036,15 @@ def create_api_app() -> FastAPI:
         client = _get_ai_client()
         if not client:
             raise HTTPException(503, "AI 未启用或未配置 API Key")
+
+        if session_id:
+            cm = _get_chat_manager()
+            cm.add_message(session_id, "user", prompt)
+
+        if session_id:
+            context = _get_chat_manager().build_context(session_id)
+        elif not context:
+            context = []
 
         system_prompt = build_system_prompt()
         messages = [
@@ -986,8 +1055,11 @@ def create_api_app() -> FastAPI:
 
         async def generate():
             try:
-                for token in client.chat_stream(messages, temperature=0.7):
-                    yield f"data: {json.dumps({'token': token})}\n\n"
+                for chunk in client.chat_stream(messages, temperature=0.7):
+                    if isinstance(chunk, dict):
+                        yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+                    elif isinstance(chunk, str):
+                        yield f"data: {json.dumps({'type': 'content', 'content': chunk}, ensure_ascii=False)}\n\n"
                 yield "data: [DONE]\n\n"
             except Exception as e:
                 from .ai.client import AIClientError
@@ -995,6 +1067,149 @@ def create_api_app() -> FastAPI:
                     yield f"data: {json.dumps({'error': str(e), 'code': getattr(e, 'code', 'unknown')})}\n\n"
                 else:
                     yield f"data: {json.dumps({'error': str(e), 'code': 'unknown'})}\n\n"
+                yield "data: [DONE]\n\n"
+
+        return StreamingResponse(
+            generate(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
+    # ── AI 对话会话管理 ──────────────────────────────────────────
+
+    @app.get("/api/chat/sessions")
+    async def list_sessions():
+        cm = _get_chat_manager()
+        sessions = cm.list_sessions(limit=20)
+        return {"sessions": sessions, "count": len(sessions)}
+
+    @app.post("/api/chat/sessions")
+    async def create_session(req: Request):
+        body = await req.json()
+        title = body.get("title", "")
+        cm = _get_chat_manager()
+        return cm.create_session(title=title)
+
+    @app.get("/api/chat/sessions/{session_id}")
+    async def get_session(session_id: str):
+        cm = _get_chat_manager()
+        session = cm.get_session(session_id)
+        if not session:
+            raise HTTPException(404, "会话不存在")
+        messages = cm.get_messages(session_id)
+        return {"session": session, "messages": messages}
+
+    @app.delete("/api/chat/sessions/{session_id}")
+    async def delete_session(session_id: str):
+        cm = _get_chat_manager()
+        cm.delete_session(session_id)
+        return {"status": "ok"}
+
+    @app.post("/api/chat/sessions/{session_id}/messages")
+    async def add_message(session_id: str, req: Request):
+        body = await req.json()
+        role = body.get("role", "user")
+        content = body.get("content", "")
+        reasoning = body.get("reasoning", "")
+        if role not in ("user", "assistant", "system"):
+            raise HTTPException(400, f"无效的 role: {role}")
+        if not content and not reasoning:
+            raise HTTPException(400, "消息内容不能为空")
+        cm = _get_chat_manager()
+        session = cm.get_session(session_id)
+        if not session:
+            raise HTTPException(404, "会话不存在")
+        return cm.add_message(session_id, role, content, reasoning)
+
+    @app.post("/api/chat/sessions/{session_id}/compact")
+    async def compact_session(session_id: str, req: Request):
+        body = await req.json()
+        summary = body.get("summary", "")
+        if not summary:
+            client = _get_ai_client()
+            if client:
+                cm = _get_chat_manager()
+                messages = cm.get_all_messages(session_id)
+                context_parts = []
+                for msg in messages:
+                    role = msg.get("role", "user")
+                    content = msg.get("content", "")
+                    if content:
+                        context_parts.append(f"{role}: {content[:300]}")
+                prompt = "请用中文简要总结以下对话的关键信息，保留重要上下文：\n\n" + "\n".join(context_parts)
+                try:
+                    resp = client.chat([
+                        {"role": "system", "content": "你是对话摘要助手。请用2-3句话概括对话要点。"},
+                        {"role": "user", "content": prompt},
+                    ], temperature=0.3)
+                    summary = resp.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+                except Exception as e:
+                    _server_log(f"AI 摘要生成失败: {e}", "WARN")
+                    summary = f"[对话摘要生成失败] 原始对话共 {len(messages)} 条消息"
+        cm = _get_chat_manager()
+        cm.compact_session(session_id, summary)
+        return {"status": "ok", "summary": summary}
+
+    @app.get("/api/chat/sessions/{session_id}/context")
+    async def get_session_context(session_id: str, max_messages: int = 30):
+        cm = _get_chat_manager()
+        context = cm.build_context(session_id, max_messages=max_messages)
+        return {"context": context}
+
+    # ── AI Agent 循环 (统一后端) ──────────────────────────────────────
+
+    @app.post("/api/chat/agent")
+    async def chat_agent_stream(req: Request):
+        """统一 Agent Loop 端点 — 后端执行 AI 调用 + 工具执行 + 错误恢复
+
+        请求体: { prompt, context?, session_id?, use_tools? }
+        响应: SSE 流, 事件类型:
+          content / reasoning / tool_use / tool_use_delta / tool_result / tool_error / tool_recovery / round_start / done / error
+        """
+        body = await req.json()
+        prompt = body.get("prompt", "").strip()
+        context_raw = body.get("context", [])
+        session_id = body.get("session_id")
+        use_tools = body.get("use_tools", True)
+
+        if not prompt:
+            raise HTTPException(400, "缺少 prompt 参数")
+
+        client = _get_ai_client()
+        if not client:
+            raise HTTPException(503, "AI 未启用或未配置 API Key")
+
+        context = _validate_context(context_raw) if context_raw else []
+        cm = _get_chat_manager() if session_id else None
+
+        from .ai.agent_loop import AgentLoop
+
+        loop = AgentLoop(
+            client=client,
+            chat_manager=cm,
+            use_tools=use_tools,
+        )
+
+        async def generate():
+            from .ai.client import AIClientError
+            try:
+                for event in loop.run(
+                    prompt=prompt,
+                    context=context,
+                    session_id=session_id,
+                ):
+                    yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+                yield "data: [DONE]\n\n"
+            except AIClientError as e:
+                yield f"data: {json.dumps({'type': 'error', 'code': getattr(e, 'code', 'unknown'), 'message': str(e)}, ensure_ascii=False)}\n\n"
+                yield "data: [DONE]\n\n"
+            except Exception as e:
+                _server_log(f"Agent loop error: {e}", "ERROR")
+                yield f"data: {json.dumps({'type': 'error', 'code': 'unknown', 'message': str(e)}, ensure_ascii=False)}\n\n"
                 yield "data: [DONE]\n\n"
 
         return StreamingResponse(
@@ -1063,7 +1278,7 @@ def create_api_app() -> FastAPI:
             else:
                 df = pd.read_csv(str(input_path), encoding="utf-8-sig")
         except Exception as e:
-            raise HTTPException(400, f"读取文件失败: {e}")
+            raise HTTPException(400, f"读取文件失败: {e}") from None
 
         status_col = _find_column(df, ["状态", "status", "State"])
         if status_col and status_col in df.columns:
@@ -1100,8 +1315,11 @@ def create_api_app() -> FastAPI:
 
         async def generate():
             try:
-                for token in client.chat_stream(messages, temperature=0.7):
-                    yield f"data: {json.dumps({'token': token})}\n\n"
+                for chunk in client.chat_stream(messages, temperature=0.7):
+                    if isinstance(chunk, dict):
+                        yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+                    elif isinstance(chunk, str):
+                        yield f"data: {json.dumps({'type': 'content', 'content': chunk}, ensure_ascii=False)}\n\n"
                 yield "data: [DONE]\n\n"
             except Exception as e:
                 from .ai.client import AIClientError
@@ -1172,6 +1390,37 @@ def create_api_app() -> FastAPI:
         import webbrowser
         webbrowser.open(str(full_path.absolute()))
         return {"opened": str(full_path.absolute())}
+
+    @app.post("/api/open/directory")
+    async def open_directory(req: Request):
+        import sys
+        import subprocess
+
+        body = await req.json()
+        dir_type = body.get("type", "").strip()
+
+        directories = {
+            "output/map": OutputPaths.MAP,
+            "output/csv": OutputPaths.CSV,
+            "data": PROJECT_DIR / "data",
+        }
+
+        target = directories.get(dir_type)
+        if not target:
+            raise HTTPException(400, f"不支持的目录类型: {dir_type}，可选: {', '.join(directories.keys())}")
+
+        target.mkdir(parents=True, exist_ok=True)
+
+        try:
+            if sys.platform == "win32":
+                os.startfile(str(target))
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", str(target)])
+            else:
+                subprocess.Popen(["xdg-open", str(target)])
+            return {"opened": str(target.resolve()), "type": dir_type}
+        except Exception as e:
+            raise HTTPException(500, f"无法打开目录: {e}")
 
     # ── 挂载 Web GUI (如果已构建) ──────────────────────────────
     web_dist = (Path(__file__).parent.parent / "web_gui" / "dist").resolve()

@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useRef } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { fetchConfig, saveConfig, testAPIKeys } from '../../lib/api'
 import type { ConfigTestResponse } from '../../lib/types'
@@ -26,6 +26,8 @@ export default function APIKeyForm() {
   const [moonshotKey, setMoonshotKey] = useState('')
   const [routingModeOverride, setRoutingModeOverride] = useState<string | null>(null)
   const [testResults, setTestResults] = useState<ConfigTestResponse>({})
+  const [testingKeys, setTestingKeys] = useState<Set<string>>(new Set())
+  const abortRef = useRef<AbortController | null>(null)
 
   const aiEnabled = aiEnabledOverride ?? (config?.ai_enabled ? 'true' : 'false')
   const aiProvider = aiProviderOverride ?? (config?.ai_provider || 'deepseek')
@@ -54,25 +56,58 @@ export default function APIKeyForm() {
   })
 
   const handleTest = async (provider: keyof ConfigTestResponse) => {
+    const keys: Record<string, string> = {}
+    if (provider === 'amap') {
+      if (!amapKey && !config?.amap_key_configured) {
+        toast.warning('请先输入高德 API Key')
+        return
+      }
+      keys.amap_key = amapKey || undefined as any
+    }
+    if (provider === 'baidu') {
+      if (!baiduAk && !config?.baidu_ak_configured) {
+        toast.warning('请先输入百度 AK')
+        return
+      }
+      keys.baidu_ak = baiduAk || undefined as any
+    }
+    if (provider === 'tianditu') {
+      if (!tiandituTk && !config?.tianditu_tk_configured) {
+        toast.warning('请先输入天地图 Key')
+        return
+      }
+      keys.tianditu_tk = tiandituTk || undefined as any
+    }
+
     setTestResults((prev) => ({ ...prev, [provider]: null }))
+    setTestingKeys((prev) => new Set(prev).add(provider))
+
+    abortRef.current?.abort()
+    const controller = new AbortController()
+    abortRef.current = controller
+
     try {
-      const keys: Record<string, string> = {}
-      if (provider === 'amap') keys.amap_key = amapKey
-      if (provider === 'baidu') keys.baidu_ak = baiduAk
-      if (provider === 'tianditu') keys.tianditu_tk = tiandituTk
-      const data = await testAPIKeys(keys)
+      const data = await testAPIKeys(keys, controller.signal)
       setTestResults((prev) => ({ ...prev, ...data }))
-    } catch {
-      setTestResults((prev) => ({ ...prev, [provider]: false }))
-      toast.error('测试失败')
+    } catch (e: any) {
+      if (e.name !== 'AbortError') {
+        setTestResults((prev) => ({ ...prev, [provider]: false }))
+        toast.error('测试请求失败')
+      }
+    } finally {
+      setTestingKeys((prev) => {
+        const next = new Set(prev)
+        next.delete(provider)
+        return next
+      })
     }
   }
 
   const testBadge = (key: keyof ConfigTestResponse) => {
     if (testResults[key] === undefined) return null
-    if (testResults[key] === null) return <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>测试中...</span>
-    if (testResults[key]) return <span style={{ fontSize: 11, color: 'var(--success)', display: 'inline-flex', alignItems: 'center', gap: 3 }}><Check size={13} /> 有效</span>
-    return <span style={{ fontSize: 11, color: 'var(--error)', display: 'inline-flex', alignItems: 'center', gap: 3 }}><X size={13} /> 无效</span>
+    if (testResults[key] === null) return <span className="test-badge testing"><Loader2 size={11} style={{ animation: 'spin 1s linear infinite' }} /> 测试中</span>
+    if (testResults[key]) return <span className="test-badge valid"><Check size={12} /> 有效</span>
+    return <span className="test-badge invalid"><X size={12} /> 无效</span>
   }
 
   if (isLoading) {
@@ -91,7 +126,7 @@ export default function APIKeyForm() {
           <input type="password" className="api-key-input" value={amapKey} onChange={(e) => setAmapKey(e.target.value)} placeholder={config?.amap_key_masked || (config?.amap_key_configured ? '已配置，留空则不修改' : '32位 Key')} />
           <div className="api-key-status" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
             <i className={config?.amap_key_configured ? 'fa-solid fa-circle-check' : 'fa-solid fa-circle-minus'} style={{ color: config?.amap_key_configured ? 'var(--success)' : 'var(--text-faint)', fontSize: 14 }} />
-            <button className="btn btn-ghost btn-sm" style={{ padding: '2px 6px', fontSize: 11 }} onClick={() => handleTest('amap')} title="测试高德 Key"><Plug size={12} /> 测试</button>
+            <button className="btn btn-ghost btn-sm" style={{ padding: '2px 6px', fontSize: 11 }} onClick={() => handleTest('amap')} disabled={testingKeys.has('amap')} title="测试高德 Key"><Plug size={12} /> 测试</button>
             {testBadge('amap')}
           </div>
         </div>
@@ -101,7 +136,7 @@ export default function APIKeyForm() {
           <input type="password" className="api-key-input" value={tiandituTk} onChange={(e) => setTiandituTk(e.target.value)} placeholder={config?.tianditu_tk_masked || (config?.tianditu_tk_configured ? '已配置，留空则不修改' : '天地图 Key')} />
           <div className="api-key-status" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
             <i className={config?.tianditu_tk_configured ? 'fa-solid fa-circle-check' : 'fa-solid fa-circle-minus'} style={{ color: config?.tianditu_tk_configured ? 'var(--success)' : 'var(--text-faint)', fontSize: 14 }} />
-            <button className="btn btn-ghost btn-sm" style={{ padding: '2px 6px', fontSize: 11 }} onClick={() => handleTest('tianditu')} title="测试天地图 Key"><Plug size={12} /> 测试</button>
+            <button className="btn btn-ghost btn-sm" style={{ padding: '2px 6px', fontSize: 11 }} onClick={() => handleTest('tianditu')} disabled={testingKeys.has('tianditu')} title="测试天地图 Key"><Plug size={12} /> 测试</button>
             {testBadge('tianditu')}
           </div>
         </div>
@@ -111,7 +146,7 @@ export default function APIKeyForm() {
           <input type="password" className="api-key-input" value={baiduAk} onChange={(e) => setBaiduAk(e.target.value)} placeholder={config?.baidu_ak_masked || (config?.baidu_ak_configured ? '已配置，留空则不修改' : '百度 AK')} />
           <div className="api-key-status" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
             <i className={config?.baidu_ak_configured ? 'fa-solid fa-circle-check' : 'fa-solid fa-circle-minus'} style={{ color: config?.baidu_ak_configured ? 'var(--success)' : 'var(--text-faint)', fontSize: 14 }} />
-            <button className="btn btn-ghost btn-sm" style={{ padding: '2px 6px', fontSize: 11 }} onClick={() => handleTest('baidu')} title="测试百度 Key"><Plug size={12} /> 测试</button>
+            <button className="btn btn-ghost btn-sm" style={{ padding: '2px 6px', fontSize: 11 }} onClick={() => handleTest('baidu')} disabled={testingKeys.has('baidu')} title="测试百度 Key"><Plug size={12} /> 测试</button>
             {testBadge('baidu')}
           </div>
         </div>

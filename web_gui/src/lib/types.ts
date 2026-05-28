@@ -153,8 +153,71 @@ export interface TasksResponse {
 
 // ── AI 消息 ──
 export interface ChatMessage {
-  role: 'user' | 'assistant' | 'system';
-  content: string;
+  id: string
+  role: 'user' | 'assistant' | 'system' | 'tool' | 'error'
+  content: string
+  reasoning?: string
+  timestamp: number
+  toolCommand?: string
+  toolStatus?: 'running' | 'done' | 'error' | 'recovering'
+  toolResult?: string
+  toolUse?: {
+    id: string
+    name: string
+    arguments: string
+  }
+  toolError?: {
+    code: string
+    message: string
+    recoverable: boolean
+    autoFixAction?: string
+    suggestion?: string
+  }
+}
+
+// ── Agent SSE Event Types ──
+export interface AgentEvent {
+  type: 'content' | 'reasoning' | 'tool_use' | 'tool_use_delta' | 'tool_result' | 'tool_error' | 'tool_recovery' | 'round_start' | 'done' | 'error'
+  // content / reasoning
+  content?: string
+  // tool_use
+  id?: string
+  name?: string
+  arguments?: string
+  arguments_delta?: string
+  // tool_result
+  command?: string
+  result?: string
+  success?: boolean
+  parsed?: unknown
+  exit_code?: number
+  status?: string
+  // tool_error
+  error?: {
+    code: string
+    message: string
+    recoverable: boolean
+    autoFixAction?: string
+    suggestion?: string
+  }
+  // tool_recovery
+  fix_command?: string
+  original_command?: string
+  wait_seconds?: number
+  // round_start
+  round?: number
+  max_rounds?: number
+  // error
+  code?: string
+  message?: string
+}
+
+// ── AI 会话 ──
+export interface ChatSession {
+  id: string
+  title: string
+  created_at: number
+  updated_at: number
 }
 
 // ── 配置保存 ──

@@ -305,6 +305,19 @@ class Config:
     ROUTING_MODE: str = os.getenv("ROUTING_MODE", "ai")
     ROUTING_AUTO_FALLBACK: bool = os.getenv("ROUTING_AUTO_FALLBACK", "false").lower() == "true"
 
+    # API 最大并发连接数（0 = 不限制）
+    API_MAX_CONCURRENT = {
+        "amap": 0,
+        "tianditu": 0,
+        "baidu": 3,
+    }
+
+    # 并发地理编码配置
+    PARALLEL_APIS: bool = os.getenv("PARALLEL_APIS", "true").lower() == "true"
+    CROSS_VALIDATE_THRESHOLD: float = float(os.getenv("CROSS_VALIDATE_THRESHOLD", "70.0"))
+    CROSS_VALIDATE_MAX_COORD_DELTA: float = float(os.getenv("CROSS_VALIDATE_MAX_COORD_DELTA", "1.0"))  # km
+    GEOCODE_PARALLEL_TIMEOUT: int = int(os.getenv("GEOCODE_PARALLEL_TIMEOUT", "8"))
+
     @classmethod
     def get_routing_default_mode(cls) -> str:
         """获取路线规划默认模式: ai（零外部成本）| api（付费）"""

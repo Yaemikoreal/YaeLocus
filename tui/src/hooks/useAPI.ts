@@ -194,5 +194,14 @@ export function useAPI() {
         body: JSON.stringify({ prompt, context }),
       });
     },
+
+    /** 流式 Agent Loop — 返回 ReadableStream (统一后端) */
+    async agentStream(prompt: string, context: ChatMessage[] = [], sessionId?: string): Promise<Response> {
+      return fetch(`${BASE}/api/chat/agent`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt, context, session_id: sessionId, use_tools: true }),
+      });
+    },
   };
 }

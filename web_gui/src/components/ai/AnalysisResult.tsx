@@ -1,6 +1,8 @@
 import { useState, useRef, useCallback } from 'react'
 import { aiAnalyzeStream } from '../../lib/api'
 import { BarChart3, AlertTriangle, Square } from 'lucide-react'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 
 export default function AnalysisResult() {
   const [filePath, setFilePath] = useState('')
@@ -88,8 +90,10 @@ export default function AnalysisResult() {
       )}
 
       {result && (
-        <div className="card" style={{ whiteSpace: 'pre-wrap', maxHeight: 500, overflow: 'auto', fontSize: 14, lineHeight: 1.6 }}>
-          {result}
+        <div className="card markdown-body" style={{ maxHeight: 500, overflow: 'auto', fontSize: 14, lineHeight: 1.6 }}>
+          <ReactMarkdown remarkPlugins={[remarkGfm]}>
+            {result}
+          </ReactMarkdown>
           {streaming && <span className="typing-indicator"><span></span><span></span><span></span></span>}
         </div>
       )}

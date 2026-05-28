@@ -290,13 +290,19 @@ class RouteWizard:
         stream_failed = False
 
         try:
-            for token in self.ai_client.chat_stream(
+            for chunk in self.ai_client.chat_stream(
                 messages=messages,
                 temperature=0.3,
                 max_tokens=4000,
             ):
-                full_text += token
-                collected_tokens += len(token)
+                if isinstance(chunk, dict):
+                    text = chunk.get("content", "")
+                    if chunk.get("type") == "reasoning":
+                        continue
+                else:
+                    text = str(chunk)
+                full_text += text
+                collected_tokens += len(text)
                 if collected_tokens > 20:
                     sys.stdout.write(".")
                     sys.stdout.flush()

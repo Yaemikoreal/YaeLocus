@@ -1,18 +1,51 @@
-import { useState, useRef, useCallback } from 'react'
-import { chatStream, executeCommand } from '../../lib/api'
+import { useState, useRef, useCallback, useEffect } from 'react'
+import { agentStream } from '../../lib/api'
+import type { AgentStreamCallbacks } from '../../lib/api'
+import { useChatStore } from '../../lib/chatStore'
 import type { ChatMessage } from '../../lib/types'
-import { Send, Square } from 'lucide-react'
+import { Send, Square, Plus, Download, Minimize2 } from 'lucide-react'
+import MessageContent from './MessageContent'
 
-const CMD_REGEX = /\[CMD\]\s*\n?(.*?)\n?\s*\[\/CMD\]/gs
-const MAX_AGENT_ROUNDS = 4
+const EMPTY_MESSAGES: ChatMessage[] = []
+
+const SLASH_COMMANDS: Record<string, string> = {
+  '/new': 'clear',
+  '/clear': 'clear',
+  '/compact': 'compact',
+  '/export': 'export',
+  '/model': 'model',
+  '/help': 'help',
+}
 
 export default function ChatPanel() {
-  const [messages, setMessages] = useState<ChatMessage[]>([])
+  const currentSessionId = useChatStore((s) => s.currentSessionId)
+  const messages = useChatStore((s) => s.messages[s.currentSessionId] || EMPTY_MESSAGES)
+  const addMessage = useChatStore((s) => s.addMessage)
+  const updateMessage = useChatStore((s) => s.updateMessage)
+  const clearCurrentSession = useChatStore((s) => s.clearCurrentSession)
+  const compactCurrentSession = useChatStore((s) => s.compactCurrentSession)
+  const exportCurrentSession = useChatStore((s) => s.exportCurrentSession)
+  const newSession = useChatStore((s) => s.newSession)
+
+  useEffect(() => {
+    if (!currentSessionId) {
+      newSession()
+    }
+  }, [currentSessionId, newSession])
+
+  useEffect(() => {
+    return () => {
+      abortRef.current?.abort()
+    }
+  }, [])
+
   const [input, setInput] = useState('')
   const [streaming, setStreaming] = useState(false)
   const [error, setError] = useState('')
   const [agentRound, setAgentRound] = useState(0)
+  const [maxRounds, setMaxRounds] = useState(4)
   const streamContent = useRef('')
+  const streamReasoning = useRef('')
   const lastRenderRef = useRef(0)
   const abortRef = useRef<AbortController | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -24,186 +57,170 @@ export default function ChatPanel() {
     setAgentRound(0)
   }, [])
 
-  const executeCmd = useCallback(async (cmd: string): Promise<string> => {
-    try {
-      const result = await executeCommand(cmd)
-      if (result.success) {
-        return result.stdout || '成功'
+  const handleSlashCommand = useCallback((text: string): boolean => {
+    const cmd = text.trim().toLowerCase()
+    const action = SLASH_COMMANDS[cmd]
+    if (!action) return false
+
+    switch (action) {
+      case 'clear':
+        clearCurrentSession()
+        return true
+      case 'compact':
+        compactCurrentSession()
+        addMessage({ role: 'system', content: '上下文已压缩至最近 10 条消息' })
+        return true
+      case 'export': {
+        const content = exportCurrentSession()
+        if (!content) return true
+        const blob = new Blob([content], { type: 'text/markdown' })
+        const url = URL.createObjectURL(blob)
+        const a = document.createElement('a')
+        a.href = url
+        a.download = `chat-${new Date().toISOString().slice(0, 10)}.md`
+        a.click()
+        URL.revokeObjectURL(url)
+        return true
       }
-      return result.stderr || result.stdout || `失败 (exit: ${result.exit_code})`
-    } catch (err: unknown) {
-      return `执行失败: ${err instanceof Error ? err.message : String(err)}`
+      case 'help':
+        addMessage({ role: 'system', content: '可用命令:\n/new — 新建对话\n/clear — 清空对话\n/compact — 压缩上下文\n/export — 导出对话\n/model — 显示当前模型\n/help — 显示帮助' })
+        return true
+      case 'model':
+        fetch('/api/config').then(r => r.json()).then((cfg) => {
+          const provider = cfg.ai_provider || 'unknown'
+          const model = cfg.ai_model || 'unknown'
+          addMessage({ role: 'system', content: `AI 模型: ${provider}/${model}` })
+        }).catch(() => {
+          addMessage({ role: 'system', content: '无法获取模型信息' })
+        })
+        return true
     }
-  }, [])
+    return false
+  }, [clearCurrentSession, compactCurrentSession, addMessage, exportCurrentSession])
 
   const handleSend = useCallback(() => {
     const trimmed = input.trim()
     if (!trimmed || streaming) return
 
-    const userMsg: ChatMessage = { role: 'user', content: trimmed }
-    const updatedMessages = [...messages, userMsg]
-    setMessages([...updatedMessages, { role: 'assistant', content: '' }])
+    if (trimmed.startsWith('/')) {
+      if (handleSlashCommand(trimmed)) {
+        setInput('')
+        return
+      }
+    }
+
+    addMessage({ role: 'user', content: trimmed })
+    const assistantId = addMessage({ role: 'assistant', content: '', reasoning: '' })
     setInput('')
     setError('')
     setStreaming(true)
     setAgentRound(0)
     streamContent.current = ''
+    streamReasoning.current = ''
 
     const controller = new AbortController()
     abortRef.current = controller
 
-    runAgentLoop(trimmed, updatedMessages, controller.signal)
-  }, [input, messages, streaming])
-
-  const runAgentLoop = useCallback(async (
-    prompt: string,
-    contextMessages: ChatMessage[],
-    signal: AbortSignal
-  ) => {
-    const context: ChatMessage[] = []
-    for (const msg of contextMessages.slice(-30)) {
+    const context: { role: string; content: string }[] = []
+    const allMsgs = useChatStore.getState().messages[currentSessionId] || []
+    for (const msg of allMsgs.slice(-30)) {
       if (msg.role === 'user' && msg.content) {
         context.push({ role: 'user', content: msg.content })
       } else if (msg.role === 'assistant' && msg.content) {
         context.push({ role: 'assistant', content: msg.content.slice(0, 800) })
       }
     }
+    context.pop()
 
-    let currentPrompt = prompt
-    let currentContext = context
-
-    for (let round = 0; round < MAX_AGENT_ROUNDS; round++) {
-      if (signal.aborted) break
-
-      setAgentRound(round + 1)
-      streamContent.current = ''
-
-      let fullContent = ''
-
-      try {
-        await new Promise<void>((resolve) => {
-          chatStream(
-            currentPrompt,
-            currentContext,
-            (token) => {
-              streamContent.current += token
-              const now = Date.now()
-              if (now - lastRenderRef.current >= 50) {
-                lastRenderRef.current = now
-                const content = streamContent.current
-                setMessages(prev => {
-                  const next = [...prev]
-                  if (next.length > 0 && next[next.length - 1].role === 'assistant') {
-                    next[next.length - 1] = { ...next[next.length - 1], content }
-                  }
-                  return next
-                })
-                scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' })
-              }
-            },
-            () => {
-              const content = streamContent.current
-              setMessages(prev => {
-                const next = [...prev]
-                if (next.length > 0 && next[next.length - 1].role === 'assistant') {
-                  next[next.length - 1] = { ...next[next.length - 1], content }
-                }
-                return next
-              })
-              resolve()
-            },
-            (err) => {
-              setError(err)
-              setStreaming(false)
-              setAgentRound(0)
-              resolve()
-            },
-            signal
-          )
-        })
-      } catch {
-        if (signal.aborted) break
-      }
-
-      fullContent = streamContent.current
-
-      // Extract [CMD] blocks
-      const cmds: string[] = []
-      const visibleContent = fullContent.replace(CMD_REGEX, (_m: string, c: string) => {
-        if (c.trim()) cmds.push(c.trim())
-        return ''
-      }).trim()
-
-      if (visibleContent || fullContent) {
-        // Update the message with visible content (commands stripped)
-        setMessages(prev => {
-          const next = [...prev]
-          if (next.length > 0 && next[next.length - 1].role === 'assistant') {
-            next[next.length - 1] = {
-              ...next[next.length - 1],
-              content: visibleContent || fullContent,
-            }
-          }
-          return next
-        })
-      }
-
-      if (cmds.length === 0) break
-
-      // Execute commands
-      let allOk = true
-      let lastErr = ''
-      let toolResults = ''
-
-      for (const cmd of cmds) {
-        if (signal.aborted) break
-        const result = await executeCmd(cmd)
-        toolResults += `命令: ${cmd}\n结果: ${result}\n\n`
-        if (result.includes('失败') || result.includes('错误') || result.includes('Error')) {
-          allOk = false
-          lastErr = result
+    const callbacks: AgentStreamCallbacks = {
+      onContent: (token: string) => {
+        streamContent.current += token
+        const now = Date.now()
+        if (now - lastRenderRef.current >= 50) {
+          lastRenderRef.current = now
+          updateMessage(assistantId, {
+            content: streamContent.current,
+            reasoning: streamReasoning.current,
+          })
+          scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' })
         }
-      }
-
-      if (!allOk) {
-        setMessages(prev => [...prev, {
-          role: 'assistant' as const,
-          content: `⚠️ 命令执行出错:\n${lastErr}`,
-        }])
-      }
-
-      // Feed results back for next agent round
-      currentContext = [
-        ...currentContext,
-        { role: 'user', content: currentPrompt },
-        { role: 'assistant', content: visibleContent || fullContent },
-        { role: 'user', content: toolResults },
-      ]
-      currentPrompt = '请基于以上命令执行结果继续分析。如果已经得到最终答案，请直接给出结论。'
+      },
+      onReasoning: (token: string) => {
+        streamReasoning.current += token
+        const now = Date.now()
+        if (now - lastRenderRef.current >= 100) {
+          lastRenderRef.current = now
+          updateMessage(assistantId, {
+            reasoning: streamReasoning.current,
+            content: streamContent.current,
+          })
+        }
+      },
+      onToolUse: () => {
+        updateMessage(assistantId, {
+          content: streamContent.current,
+          reasoning: streamReasoning.current,
+        })
+      },
+      onToolUseDelta: () => {},
+      onToolResult: (result) => {
+        const toolMsg = `⏺ ${result.command}${result.success ? '' : ' (失败)'}`
+        // 移除前端二次截断，依赖后端截断（阈值 10000）
+        streamContent.current += `\n${toolMsg}\n\`\`\`\n${result.result}\n\`\`\`\n`
+        updateMessage(assistantId, {
+          content: streamContent.current,
+          reasoning: streamReasoning.current,
+        })
+        scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' })
+      },
+      onToolError: (err) => {
+        const errorMsg = `⏺ ${err.command} — ${err.error.message}${err.recoverable ? ' (自动恢复中...)' : ''}`
+        streamContent.current += `\n${errorMsg}\n`
+        updateMessage(assistantId, {
+          content: streamContent.current,
+          reasoning: streamReasoning.current,
+        })
+      },
+      onToolRecovery: (info) => {
+        const msg = info.fix_command
+          ? `⟳ 自动修复: ${info.fix_command}`
+          : `⟳ 等待 ${info.wait_seconds}s 后重试...`
+        streamContent.current += `\n${msg}\n`
+        updateMessage(assistantId, {
+          content: streamContent.current,
+          reasoning: streamReasoning.current,
+        })
+      },
+      onRoundStart: (info) => {
+        setAgentRound(info.round)
+        setMaxRounds(info.max_rounds)
+      },
+      onDone: () => {
+        updateMessage(assistantId, {
+          content: streamContent.current,
+          reasoning: streamReasoning.current,
+        })
+        setStreaming(false)
+        setAgentRound(0)
+        scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' })
+      },
+      onError: (err) => {
+        setError(`${err.message}`)
+        updateMessage(assistantId, {
+          content: streamContent.current || '(AI 响应异常)',
+          reasoning: streamReasoning.current,
+        })
+        setStreaming(false)
+        setAgentRound(0)
+      },
     }
 
-    setStreaming(false)
-    setAgentRound(0)
-  }, [executeCmd])
-
-  const handleQuickAction = useCallback((text: string) => {
-    setInput(text)
-    // Use setTimeout to ensure state is updated before sending
-    setTimeout(() => {
-      const userMsg: ChatMessage = { role: 'user', content: text }
-      const updatedMessages = [...messages, userMsg]
-      setMessages([...updatedMessages, { role: 'assistant', content: '' }])
-      setError('')
-      setStreaming(true)
-      setAgentRound(0)
-      streamContent.current = ''
-
-      const controller = new AbortController()
-      abortRef.current = controller
-
-      runAgentLoop(text, updatedMessages, controller.signal)
-    }, 0)
-  }, [messages, runAgentLoop])
+    agentStream(trimmed, callbacks, {
+      context,
+      sessionId: currentSessionId || undefined,
+      signal: controller.signal,
+    })
+  }, [input, streaming, addMessage, updateMessage, handleSlashCommand, currentSessionId])
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -220,44 +237,80 @@ export default function ChatPanel() {
 
   return (
     <div className="chat-container">
+      <div className="chat-toolbar">
+        <button className="chat-toolbar-btn" onClick={() => clearCurrentSession()} title="新建对话">
+          <Plus size={14} />
+        </button>
+        <button className="chat-toolbar-btn" onClick={() => compactCurrentSession()} title="压缩上下文">
+          <Minimize2 size={14} />
+        </button>
+        <button className="chat-toolbar-btn"
+          onClick={() => {
+            const content = exportCurrentSession()
+            if (content) {
+              const blob = new Blob([content], { type: 'text/markdown' })
+              const url = URL.createObjectURL(blob)
+              const a = document.createElement('a')
+              a.href = url
+              a.download = `chat-${new Date().toISOString().slice(0, 10)}.md`
+              a.click()
+              URL.revokeObjectURL(url)
+            }
+          }}
+          title="导出对话"
+        >
+          <Download size={14} />
+        </button>
+      </div>
+
       <div ref={scrollRef} className="chat-messages">
-        {messages.length === 0 && (
+        {messages.length === 0 && !streaming && (
           <div className="chat-welcome">
             <div className="chat-welcome-icon">
-              <i className="fa-solid fa-sparkles" />
+              <i className="fa-solid fa-wand-magic-sparkles" />
             </div>
             <h3>YaeLocus AI 助手</h3>
             <p>基于地理数据的智能分析，支持数据洞察、路线规划和地址解析</p>
             <div className="quick-actions">
-              <button className="quick-action" onClick={() => handleQuickAction('分析最近编码数据的分布特征')}>
+              <button className="quick-action" onClick={() => { setInput('分析最近编码数据的分布特征'); handleSend() }}>
                 分析数据分布
               </button>
-              <button className="quick-action" onClick={() => handleQuickAction('推荐一条高效的巡访路线')}>
+              <button className="quick-action" onClick={() => { setInput('推荐一条高效的巡访路线'); handleSend() }}>
                 推荐巡访路线
               </button>
-              <button className="quick-action" onClick={() => handleQuickAction('这些地址中有哪些可能编码错误？')}>
+              <button className="quick-action" onClick={() => { setInput('这些地址中有哪些可能编码错误？'); handleSend() }}>
                 检测编码异常
               </button>
-              <button className="quick-action" onClick={() => handleQuickAction('帮我规划明天的出行路线')}>
+              <button className="quick-action" onClick={() => { setInput('帮我规划明天的出行路线'); handleSend() }}>
                 规划出行路线
               </button>
             </div>
           </div>
         )}
-        {messages.map((msg, i) => (
-          <div key={i} className="message">
+        {messages.map((msg) => (
+          <div key={msg.id} className="message">
             <div className={`message-avatar ${msg.role}`}>
-              <i className={msg.role === 'user' ? 'fa-solid fa-user' : 'fa-solid fa-sparkles'} />
+              <i className={msg.role === 'user' ? 'fa-solid fa-user' : 'fa-solid fa-wand-magic-sparkles'} />
             </div>
             <div className="message-body">
-              <div className="message-role">{msg.role === 'user' ? '你' : 'YaeLocus AI'}</div>
-              <div className="message-content">
-                {msg.content || (streaming && i === messages.length - 1 ? (
+              <div className="message-role">
+                {msg.role === 'user' ? '你' : msg.role === 'system' ? '系统' : 'YaeLocus AI'}
+              </div>
+              {msg.reasoning && (
+                <details className="reasoning-block">
+                  <summary>💭 思考过程</summary>
+                  <div className="reasoning-content">{msg.reasoning}</div>
+                </details>
+              )}
+              {msg.content ? (
+                <MessageContent content={msg.content} />
+              ) : (streaming && messages.indexOf(msg) === messages.length - 1 ? (
+                <div className="message-content">
                   <span className="typing-indicator">
                     <span></span><span></span><span></span>
                   </span>
-                ) : '')}
-              </div>
+                </div>
+              ) : null)}
             </div>
           </div>
         ))}
@@ -269,9 +322,9 @@ export default function ChatPanel() {
         </div>
       )}
 
-      {agentRound > 1 && streaming && (
+      {agentRound > 0 && streaming && (
         <div className="alert alert-info" style={{ margin: '0 24px 8px' }}>
-          Agent 执行第 {agentRound} 轮...
+          Agent 执行第 {agentRound}/{maxRounds} 轮...
         </div>
       )}
 
@@ -283,7 +336,7 @@ export default function ChatPanel() {
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={handleKeyDown}
             onInput={handleTextareaInput}
-            placeholder="输入你的问题，或描述你想分析的地理数据..."
+            placeholder="输入你的问题，或 /new /compact /help ..."
             disabled={streaming}
             rows={1}
           />

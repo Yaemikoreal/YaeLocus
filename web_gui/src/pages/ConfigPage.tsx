@@ -1,7 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
 import { fetchConfig } from '../lib/api'
 import APIKeyForm from '../components/config/APIKeyForm'
-import { Database, Activity, Key, ServerOff, Route, Zap } from 'lucide-react'
+import { Database, Activity, ServerOff, Route, Zap, Wifi, WifiOff } from 'lucide-react'
 
 export default function ConfigPage() {
   const { data: config, isLoading, isError } = useQuery({
@@ -11,6 +11,7 @@ export default function ConfigPage() {
   })
 
   const apiUsage = config?.api_usage
+  const apisOk = config?.apis?.length ?? 0
 
   return (
     <div className="page">
@@ -27,28 +28,59 @@ export default function ConfigPage() {
 
       {config && (
         <div className="status-overview">
-          <div className="status-item">
-            <Key size={16} style={{ color: (config.apis?.length ?? 0) > 0 ? 'var(--success)' : 'var(--error)' }} />
-            <span>API: {(config.apis?.length ?? 0) > 0 ? config.apis.join(', ') : '未配置'}</span>
+          <div className="status-overview-title">
+            <Activity size={15} />
+            API 状态
           </div>
-          <div className="status-item">
-            <Activity size={16} style={{ color: config.ai_enabled ? 'var(--success)' : 'var(--error)' }} />
-            <span>AI: {config.ai_enabled ? `${config.ai_provider} (已开启)` : '未开启'}</span>
-          </div>
-          <div className="status-item">
-            <Database size={16} style={{ color: 'var(--info)' }} />
-            <span>缓存: {config.cache?.total_entries ?? 0} 条 (命中率 {config.cache?.hit_rate?.toFixed(1) ?? 0}%)</span>
-          </div>
-          <div className="status-item">
-            <Route size={16} style={{ color: 'var(--color-primary)' }} />
-            <span>路线: {config.routing_mode === 'ai' ? 'AI 模式' : 'API 模式'}</span>
-          </div>
-          {apiUsage && Object.entries(apiUsage).map(([name, usage]: [string, any]) => (
-            <div className="status-item" key={name}>
-              <Zap size={14} style={{ color: (usage.remaining ?? 0) > 0 ? 'var(--success)' : 'var(--warning)' }} />
-              <span style={{ fontSize: 12 }}>{name}: {usage.call_count ?? 0}/{usage.daily_limit ?? 0} ({usage.remaining ?? 0} 剩余)</span>
+          <div className="status-cards">
+            <div className="status-card">
+              <div className="status-card-icon" style={{ color: apisOk > 0 ? 'var(--success)' : 'var(--error)' }}>
+                {apisOk > 0 ? <Wifi size={18} /> : <WifiOff size={18} />}
+              </div>
+              <div className="status-card-info">
+                <div className="status-card-label">API 服务</div>
+                <div className="status-card-value">{apisOk > 0 ? config.apis.join(', ') : '未配置'}</div>
+              </div>
             </div>
-          ))}
+            <div className="status-card">
+              <div className="status-card-icon" style={{ color: config.ai_enabled ? 'var(--success)' : 'var(--text-muted)' }}>
+                <Activity size={18} />
+              </div>
+              <div className="status-card-info">
+                <div className="status-card-label">AI 模型</div>
+                <div className="status-card-value">{config.ai_enabled ? `${config.ai_provider} (已开启)` : '未开启'}</div>
+              </div>
+            </div>
+            <div className="status-card">
+              <div className="status-card-icon" style={{ color: 'var(--info)' }}>
+                <Database size={18} />
+              </div>
+              <div className="status-card-info">
+                <div className="status-card-label">缓存</div>
+                <div className="status-card-value">{config.cache?.total_entries ?? 0} 条 (命中率 {config.cache?.hit_rate?.toFixed(1) ?? 0}%)</div>
+              </div>
+            </div>
+            <div className="status-card">
+              <div className="status-card-icon" style={{ color: 'var(--color-primary)' }}>
+                <Route size={18} />
+              </div>
+              <div className="status-card-info">
+                <div className="status-card-label">路线模式</div>
+                <div className="status-card-value">{config.routing_mode === 'ai' ? 'AI 模式' : 'API 模式'}</div>
+              </div>
+            </div>
+            {apiUsage && Object.entries(apiUsage).map(([name, usage]: [string, any]) => (
+              <div className="status-card" key={name}>
+                <div className="status-card-icon" style={{ color: (usage.remaining ?? 0) > 0 ? 'var(--success)' : 'var(--warning)' }}>
+                  <Zap size={18} />
+                </div>
+                <div className="status-card-info">
+                  <div className="status-card-label">{name} 配额</div>
+                  <div className="status-card-value">{usage.call_count ?? 0}/{usage.daily_limit ?? 0} ({usage.remaining ?? 0} 剩余)</div>
+                </div>
+              </div>
+            ))}
+          </div>
         </div>
       )}
 

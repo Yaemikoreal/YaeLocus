@@ -1,13 +1,22 @@
 import { useQuery } from '@tanstack/react-query'
-import { fetchDataFiles } from '../../lib/api'
+import { fetchDataFiles, openDirectory } from '../../lib/api'
 import { formatFileSize, formatDate } from '../../lib/utils'
-import { RefreshCw, Loader2, FileSpreadsheet, FileText } from 'lucide-react'
+import { RefreshCw, Loader2, FileSpreadsheet, FileText, FolderOpen } from 'lucide-react'
+import { toast } from 'sonner'
 
 export default function FileBrowser() {
   const { data: files, isLoading, isError, error, refetch } = useQuery({
     queryKey: ['dataFiles'],
     queryFn: ({ signal }) => fetchDataFiles(signal),
   })
+
+  const handleOpenDir = async () => {
+    try {
+      await openDirectory('data')
+    } catch (e: any) {
+      toast.error(e.message || '无法打开目录')
+    }
+  }
 
   return (
     <div className="card">
@@ -16,9 +25,14 @@ export default function FileBrowser() {
           <h3 className="card-title" style={{ marginBottom: 4 }}><i className="fa-solid fa-folder-open" /> 数据文件列表</h3>
           <p className="card-desc">data/ 目录中可用于地理编码的 CSV / XLSX 文件</p>
         </div>
-        <button onClick={() => refetch()} className="btn btn-secondary btn-sm">
-          <RefreshCw size={14} /> 刷新
-        </button>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button onClick={handleOpenDir} className="btn btn-secondary btn-sm" title="在文件资源管理器中打开 data 目录">
+            <FolderOpen size={14} /> 打开目录
+          </button>
+          <button onClick={() => refetch()} className="btn btn-secondary btn-sm">
+            <RefreshCw size={14} /> 刷新
+          </button>
+        </div>
       </div>
 
       {isLoading && (

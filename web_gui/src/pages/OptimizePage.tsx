@@ -10,7 +10,7 @@ export default function OptimizePage() {
           <p>请先完成地理编码，然后使用 AI 助手的路线分析功能规划行程</p>
           <div style={{ marginTop: 16 }}>
             <a href="/ai" className="btn btn-primary">
-              <i className="fa-solid fa-sparkles" /> 前往 AI 助手
+              <i className="fa-solid fa-wand-magic-sparkles" /> 前往 AI 助手
             </a>
           </div>
         </div>
