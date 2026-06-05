@@ -155,6 +155,7 @@ class Geocoder:
         province: str = None,
         city: str = None,
         district: str = None,
+        precision_level: str = None,
         original_lat: float = None,
         original_lon: float = None
     ) -> GeocodeResult:
@@ -167,6 +168,7 @@ class Geocoder:
             province=province,
             city=city,
             district=district,
+            precision_level=precision_level,
             source=source,
             coordinate_system=coordinate_system,
             original_lat=original_lat,
@@ -203,7 +205,8 @@ class Geocoder:
                         address, wgs_lat, wgs_lon,
                         geo.get("formatted_address"), "amap", "GCJ-02",
                         geo.get("province"), geo.get("city"), geo.get("district"),
-                        lat, lon
+                        precision_level=geo.get("level"),
+                        original_lat=lat, original_lon=lon
                     )
 
             self.logger.log(
@@ -248,7 +251,8 @@ class Geocoder:
                 return self._build_result(
                     address, lat, lon,
                     loc.get("address"), "tianditu", "CGCS2000",
-                    loc.get("province"), loc.get("city"), loc.get("county")
+                    loc.get("province"), loc.get("city"), loc.get("county"),
+                    precision_level=loc.get("level"),
                 )
 
             self.logger.log(
@@ -285,6 +289,8 @@ class Geocoder:
                 lat = location.get("lat", 0)
                 lon = location.get("lng", 0)
                 wgs_lat, wgs_lon = bd09_to_wgs84(lat, lon)
+                addr_component = result_data.get("addressComponent", {})
+                baidu_level = result_data.get("level")
 
                 self.logger.log(
                     address=address, api_name="baidu", status="success",
@@ -295,6 +301,10 @@ class Geocoder:
                 return self._build_result(
                     address, wgs_lat, wgs_lon,
                     result_data.get("formatted_address"), "baidu", "BD-09",
+                    province=addr_component.get("province"),
+                    city=addr_component.get("city"),
+                    district=addr_component.get("district"),
+                    precision_level=baidu_level,
                     original_lat=lat, original_lon=lon
                 )
 
@@ -316,6 +326,10 @@ class Geocoder:
     def geocode(self, address: str) -> Dict:
         """
         地理编码单个地址（集成预处理和验证）
+
+        注意：此方法会按优先级尝试所有 API，直到找到可信且完整的结果。
+        与早期版本不同，首个 API 成功但置信度不足或 formatted_address 缺失时
+        不会立即返回，而是继续尝试下一个 API 并保留最优结果。
 
         Args:
             address: 地址字符串
@@ -359,39 +373,170 @@ class Geocoder:
             return cached
 
         # 按优先级尝试各API（使用清洗后的地址）
+        best_result = None
+        best_confidence = None
         for api_name in Config.API_PRIORITY:
             method = getattr(self, f"_geocode_{api_name}", None)
             if method:
-                result = method(normalized)  # 使用清洗后的地址调用API
+                result = method(normalized)
                 if result:
                     result.success = True
                     with self._counter_lock:
                         self._success_count += 1
                     result_dict = result.to_dict()
 
-                    # === 结果验证阶段（不再使用 province_hint）===
                     confidence = self.validator.validate(
-                        str(address),  # 原始地址
+                        str(address),
                         result_dict,
-                        None  # 不再传入 province_hint
+                        None
                     )
 
-                    # 添加置信度字段
                     result_dict["confidence"] = {
                         "total": confidence.total,
                         "issues": confidence.issues,
                         "is_trustworthy": confidence.is_trustworthy
                     }
 
-                    # 低置信度警告
                     if not confidence.is_trustworthy:
                         result_dict["warning"] = "置信度较低，建议人工核实"
 
-                    # 写入缓存（仅使用标准化地址作为键，智能缓存键会处理变体）
-                    self.cache.set(normalized, result_dict, self._cache_ttl)
-                    return result_dict
+                    if best_result is None:
+                        best_result = result_dict
+                        best_confidence = confidence
+
+                    if result_dict.get("formatted_address") and best_result.get("formatted_address"):
+                        if confidence.is_trustworthy and not best_confidence.is_trustworthy:
+                            best_result = result_dict
+                            best_confidence = confidence
+                        elif confidence.total > best_confidence.total:
+                            best_result = result_dict
+                            best_confidence = confidence
+                        self.cache.set(normalized, best_result, self._cache_ttl)
+                        return best_result
+
+                    if not best_result.get("formatted_address") and result_dict.get("formatted_address"):
+                        best_result = result_dict
+                        best_confidence = confidence
+                    elif best_result.get("formatted_address") and not result_dict.get("formatted_address"):
+                        pass
+                    else:
+                        if confidence.total > (best_confidence.total if best_confidence else 0):
+                            best_result = result_dict
+                            best_confidence = confidence
+
+                    if result_dict.get("formatted_address") and confidence.is_trustworthy:
+                        self.cache.set(normalized, result_dict, self._cache_ttl)
+                        return result_dict
+
+        if best_result is not None:
+            self.cache.set(normalized, best_result, self._cache_ttl)
+            return best_result
 
         # 所有API都失败
+        return {
+            "success": False,
+            "original_address": str(address),
+            "normalized_address": normalized,
+            "error": "All APIs failed",
+            "confidence": {"total": 0, "issues": ["All APIs failed"], "is_trustworthy": False}
+        }
+
+    def _rework_geocode(self, address: str) -> Dict:
+        """返工专用地理编码：优先高德保底，逐 API 尝试直到获得精确结果
+
+        与 geocode() 的区别：
+        1. 强制跳过缓存（调用前应先 cache.delete）
+        2. 高德优先尝试，即使 Config.API_PRIORITY 中不是首位
+        3. 精度不足（省/市/区县级）仍会继续尝试下一个 API
+        4. 最终仍不精确时保留结果但标记 precision_level
+
+        Args:
+            address: 原始地址字符串
+
+        Returns:
+            地理编码结果字典
+        """
+        from .validation.confidence import is_imprecise_result
+
+        is_valid, reason = self.filter_obj.is_valid(address)
+        if not is_valid:
+            return {
+                "success": False,
+                "original_address": str(address),
+                "error": f"无效地址: {reason}",
+                "confidence": {"total": 0, "issues": [reason], "is_trustworthy": False}
+            }
+
+        split_result = self.splitter.split(str(address))
+        address_part = split_result["address"]
+        if not address_part or not address_part.strip():
+            return {"success": False, "original_address": str(address), "error": "Empty address after split"}
+
+        normalized, meta = self.normalizer.normalize(address_part)
+        if not normalized or not normalized.strip():
+            return {"success": False, "original_address": str(address), "error": "Empty address"}
+
+        rework_order = ["amap"]
+        for api_name in Config.API_PRIORITY:
+            if api_name not in rework_order:
+                rework_order.append(api_name)
+
+        best_result = None
+        best_confidence = None
+        for api_name in rework_order:
+            method = getattr(self, f"_geocode_{api_name}", None)
+            if not method:
+                continue
+            result = method(normalized)
+            if not result:
+                continue
+
+            result.success = True
+            result_dict = result.to_dict()
+
+            confidence = self.validator.validate(str(address), result_dict, None)
+            result_dict["confidence"] = {
+                "total": confidence.total,
+                "issues": confidence.issues,
+                "is_trustworthy": confidence.is_trustworthy
+            }
+            if not confidence.is_trustworthy:
+                result_dict["warning"] = "置信度较低，建议人工核实"
+
+            if best_result is None:
+                best_result = result_dict
+                best_confidence = confidence
+
+            if result_dict.get("formatted_address") and not is_imprecise_result(result_dict):
+                best_result = result_dict
+                best_confidence = confidence
+                self.cache.set(normalized, result_dict, self._cache_ttl)
+                return result_dict
+
+            if not best_result.get("formatted_address") and result_dict.get("formatted_address"):
+                best_result = result_dict
+                best_confidence = confidence
+            elif best_result.get("formatted_address") and not result_dict.get("formatted_address"):
+                pass
+            elif result_dict.get("formatted_address") and best_result.get("formatted_address"):
+                if is_imprecise_result(best_result) and not is_imprecise_result(result_dict):
+                    best_result = result_dict
+                    best_confidence = confidence
+                elif not is_imprecise_result(best_result) and is_imprecise_result(result_dict):
+                    pass
+                else:
+                    if confidence.total > (best_confidence.total if best_confidence else 0):
+                        best_result = result_dict
+                        best_confidence = confidence
+            else:
+                if confidence.total > (best_confidence.total if best_confidence else 0):
+                    best_result = result_dict
+                    best_confidence = confidence
+
+        if best_result is not None:
+            self.cache.set(normalized, best_result, self._cache_ttl)
+            return best_result
+
         return {
             "success": False,
             "original_address": str(address),

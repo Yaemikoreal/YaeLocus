@@ -50,6 +50,14 @@ def _find_column(df, candidates: list) -> Optional[str]:
     return None
 
 
+def _is_imprecise(result: dict) -> bool:
+    """判断地理编码结果精确度是否不足（仅到省/市/区县级）"""
+    if not result or not result.get("success"):
+        return False
+    from .validation.confidence import is_imprecise_result
+    return is_imprecise_result(result)
+
+
 def _server_log(msg: str, level: str = "INFO") -> None:
     ts = _dt.datetime.now().strftime("%H:%M:%S")
     tag = {"INFO": "●", "WARN": "▲", "ERROR": "✗"}.get(level, "●")
@@ -60,7 +68,46 @@ _chat_manager: Optional[ChatManager] = None
 
 _tasks: dict = {}
 _tasks_lock = threading.Lock()
+_file_write_locks: dict = {}
+_file_write_locks_lock = threading.Lock()
 _cleanup_started = False
+
+
+def _get_file_write_lock(path_str: str) -> threading.Lock:
+    with _file_write_locks_lock:
+        if path_str not in _file_write_locks:
+            _file_write_locks[path_str] = threading.Lock()
+        return _file_write_locks[path_str]
+
+
+def _safe_write_csv(df, csv_path: Path, task_id: str = "", max_retries: int = 3, delay: float = 1.0) -> Path:
+    stem = csv_path.stem
+    suffix = csv_path.suffix
+    if task_id:
+        csv_path = csv_path.with_name(f"{stem}_{task_id}{suffix}")
+    lock = _get_file_write_lock(str(csv_path))
+    with lock:
+        last_err = None
+        for attempt in range(max_retries):
+            try:
+                df.to_csv(str(csv_path), index=False, encoding="utf-8-sig")
+                return csv_path
+            except PermissionError as e:
+                last_err = e
+                if attempt < max_retries - 1:
+                    import time as _t
+                    _t.sleep(delay * (attempt + 1))
+                else:
+                    fallback = csv_path.with_name(
+                        f"{stem}_{task_id or 'fallback'}_{int(time.time())}{suffix}"
+                    )
+                    try:
+                        df.to_csv(str(fallback), index=False, encoding="utf-8-sig")
+                        _server_log(f"CSV 写入回退到备用路径: {fallback}", "WARN")
+                        return fallback
+                    except Exception:
+                        _server_log(f"CSV 写入备用路径也失败: {fallback}", "ERROR")
+                        raise last_err
 
 
 def _get_db() -> DatabaseManager:
@@ -551,27 +598,144 @@ def create_api_app() -> FastAPI:
                 total = len(addresses)
                 results = geocoder.batch_geocode(addresses, progress=False)
 
-                df["longitude"] = [r.get("longitude") if r else None for r in results]
-                df["latitude"] = [r.get("latitude") if r else None for r in results]
-                df["source"] = [r.get("source") if r else None for r in results]
+                address_to_result = {}
+                for addr, result in zip(addresses, results):
+                    addr_key = str(addr).strip()
+                    address_to_result[addr_key] = result
+
+                longitude_list = []
+                latitude_list = []
+                source_list = []
+                formatted_address_list = []
+                province_list = []
+                city_list = []
+                district_list = []
+                precision_level_list = []
+                status_list = []
+
+                for addr in df[column]:
+                    addr_str = str(addr).strip() if pd.notna(addr) else ""
+                    result = address_to_result.get(addr_str)
+                    if result and result.get("success"):
+                        longitude_list.append(result.get("longitude"))
+                        latitude_list.append(result.get("latitude"))
+                        source_list.append(result.get("source"))
+                        formatted_address_list.append(result.get("formatted_address") or "")
+                        province_list.append(result.get("province"))
+                        city_list.append(result.get("city"))
+                        district_list.append(result.get("district"))
+                        precision_level_list.append(result.get("precision_level"))
+                        if not result.get("formatted_address"):
+                            status_list.append("失败")
+                        elif _is_imprecise(result):
+                            status_list.append("精确度不足")
+                        else:
+                            status_list.append("成功")
+                    elif result:
+                        longitude_list.append(None)
+                        latitude_list.append(None)
+                        source_list.append(result.get("source"))
+                        formatted_address_list.append(None)
+                        province_list.append(None)
+                        city_list.append(None)
+                        district_list.append(None)
+                        precision_level_list.append(None)
+                        status_list.append("失败")
+                    else:
+                        longitude_list.append(None)
+                        latitude_list.append(None)
+                        source_list.append(None)
+                        formatted_address_list.append(None)
+                        province_list.append(None)
+                        city_list.append(None)
+                        district_list.append(None)
+                        precision_level_list.append(None)
+                        status_list.append("空地址" if not addr_str else "未处理")
+
+                df["longitude"] = longitude_list
+                df["latitude"] = latitude_list
+                df["source"] = source_list
+                df["formatted_address"] = formatted_address_list
+                df["province"] = province_list
+                df["city"] = city_list
+                df["district"] = district_list
+                df["precision_level"] = precision_level_list
+                df["status"] = status_list
+
+                rework_indices = []
+                for ri, r in enumerate(results):
+                    if r and r.get("success") and (
+                        not r.get("formatted_address") or _is_imprecise(r)
+                    ):
+                        rework_indices.append(ri)
+
+                rework_count = 0
+                if rework_indices:
+                    _server_log(f"非SSE批量: 发现 {len(rework_indices)} 条需返工的结果")
+                    for ri in rework_indices:
+                        addr = addresses[ri]
+                        geocoder.cache.delete(addr)
+                        rework_result = geocoder._rework_geocode(addr)
+                        if rework_result and rework_result.get("success"):
+                            old_r = results[ri]
+                            old_had_addr = bool(old_r and old_r.get("formatted_address"))
+                            new_has_addr = bool(rework_result.get("formatted_address"))
+                            old_imprecise = _is_imprecise(old_r) if old_r else True
+                            new_precise = not _is_imprecise(rework_result)
+                            if (not old_had_addr and new_has_addr) or (old_imprecise and new_precise and new_has_addr):
+                                results[ri] = rework_result
+                                rework_count += 1
+
+                    if rework_count > 0:
+                        address_to_result_rework = {}
+                        for addr, result in zip(addresses, results):
+                            addr_key = str(addr).strip()
+                            address_to_result_rework[addr_key] = result
+                        for col_name, field_name in [
+                            ("formatted_address", "formatted_address"),
+                            ("province", "province"), ("city", "city"),
+                            ("district", "district"), ("precision_level", "precision_level"),
+                            ("longitude", "longitude"), ("latitude", "latitude"),
+                            ("source", "source"),
+                        ]:
+                            if col_name in df.columns:
+                                vals = []
+                                for addr in df[column]:
+                                    addr_str = str(addr).strip() if pd.notna(addr) else ""
+                                    r = address_to_result_rework.get(addr_str)
+                                    vals.append(r.get(field_name) if r else None)
+                                df[col_name] = vals
+                        for row_idx, addr in enumerate(df[column]):
+                            addr_str = str(addr).strip() if pd.notna(addr) else ""
+                            r = address_to_result_rework.get(addr_str)
+                            if r and r.get("success"):
+                                if not r.get("formatted_address"):
+                                    df.at[row_idx, "status"] = "失败"
+                                elif _is_imprecise(r):
+                                    df.at[row_idx, "status"] = "精确度不足"
+                                else:
+                                    df.at[row_idx, "status"] = "成功"
 
                 stem = input_path.stem
                 csv_path = OutputPaths.CSV / f"{stem}.csv"
-                df.to_csv(csv_path, index=False, encoding="utf-8-sig")
+                actual_csv = _safe_write_csv(df, csv_path, task_id)
 
                 from .map_visualizer import create_map
+                valid_for_map = [r for r in results if r.get("success") and r.get("formatted_address") and not _is_imprecise(r)]
                 map_path = OutputPaths.MAP / f"{stem}_map.html"
-                create_map(results, str(map_path))
+                if valid_for_map:
+                    create_map(valid_for_map, str(map_path))
 
                 with _tasks_lock:
-                    success_n = sum(1 for r in results if r.get("success"))
+                    success_n = sum(1 for r in results if r and r.get("success") and r.get("formatted_address") and not _is_imprecise(r))
                     _tasks[task_id] = {
                         "status": "done",
                         "progress": 100,
                         "total": total,
                         "success": success_n,
-                        "csv": str(csv_path),
-                        "map": str(map_path),
+                        "csv": str(actual_csv),
+                        "map": str(map_path) if valid_for_map else None,
+                        "rework_count": rework_count,
                         "_completed_at": time.time(),
                     }
                 _persist_task(task_id, _tasks[task_id])
@@ -607,9 +771,11 @@ def create_api_app() -> FastAPI:
         filename = file.filename or "uploaded"
 
         async def generate_progress():
+            import asyncio as _asyncio
             task_id = str(uuid.uuid4())[:8]
             started_at = time.time()
             yield f"data: {json.dumps({'task_id': task_id}, ensure_ascii=False)}\n\n"
+            await _asyncio.sleep(0)
 
             try:
                 import pandas as pd
@@ -617,20 +783,24 @@ def create_api_app() -> FastAPI:
                 geocoder = _get_geocoder()
 
                 yield f"data: {json.dumps({'step': 'reading', 'label': '读取文件', 'status': 'running'}, ensure_ascii=False)}\n\n"
+                await _asyncio.sleep(0)
 
                 ext = Path(filename).suffix.lower()
+                loop = _asyncio.get_event_loop()
                 if ext in (".xlsx", ".xls"):
                     engine = "openpyxl" if ext == ".xlsx" else "xlrd"
-                    df = pd.read_excel(BytesIO(content), engine=engine)
+                    df = await loop.run_in_executor(None, lambda: pd.read_excel(BytesIO(content), engine=engine))
                 else:
-                    df = pd.read_csv(BytesIO(content), encoding="utf-8-sig")
+                    df = await loop.run_in_executor(None, lambda: pd.read_csv(BytesIO(content), encoding="utf-8-sig"))
 
                 total = len(df)
-                yield f"data: {json.dumps({'step': 'reading', 'label': '读取文件', 'status': 'done', 'total': total}, ensure_ascii=False)}\n\n"
+                yield f"data: {json.dumps({'step': 'reading', 'label': '读取文件', 'status': 'done', 'total': total, 'current': total}, ensure_ascii=False)}\n\n"
+                await _asyncio.sleep(0)
 
                 if column not in df.columns:
                     error_msg = f"列 '{column}' 不存在，可用列: {list(df.columns)}"
                     yield f"data: {json.dumps({'error': error_msg, 'step': 'processing'}, ensure_ascii=False)}\n\n"
+                    await _asyncio.sleep(0)
                     _persist_task(task_id, {
                         "task_id": task_id, "status": "error", "input_file": filename,
                         "column": column, "city": city, "total": 0, "success": 0,
@@ -642,6 +812,7 @@ def create_api_app() -> FastAPI:
                 addresses = df[column].dropna().astype(str).tolist()
                 if len(addresses) == 0:
                     yield f"data: {json.dumps({'error': '未找到有效地址', 'step': 'processing'}, ensure_ascii=False)}\n\n"
+                    await _asyncio.sleep(0)
                     _persist_task(task_id, {
                         "task_id": task_id, "status": "error", "input_file": filename,
                         "column": column, "city": city, "total": 0, "success": 0,
@@ -664,11 +835,14 @@ def create_api_app() -> FastAPI:
 
                 total = len(addresses)
                 yield f"data: {json.dumps({'step': 'processing', 'label': '处理地址', 'status': 'running', 'total': total, 'current': 0, 'success': 0}, ensure_ascii=False)}\n\n"
+                await _asyncio.sleep(0)
 
                 use_parallel = workers != "1"
                 num_workers = 3 if use_parallel else 1
 
-                cached_results = geocoder.cache.get_batch_prefetch(addresses)
+                cached_results = await loop.run_in_executor(
+                    None, lambda: geocoder.cache.get_batch_prefetch(addresses)
+                )
                 uncached_indices = []
                 uncached_addresses = []
                 for idx, addr in enumerate(addresses):
@@ -726,14 +900,19 @@ def create_api_app() -> FastAPI:
 
                             i = idx
                             yield f"data: {json.dumps({'type': 'geocode_result', 'index': i, 'data': results[idx]}, ensure_ascii=False)}\n\n"
+                            await _asyncio.sleep(0)
 
                             done = sum(1 for r in results if r is not None)
-                            if done % 10 == 0 or done == total:
+                            progress_interval = 1 if total <= 20 else 5
+                            if done % progress_interval == 0 or done == total:
                                 yield f"data: {json.dumps({'step': 'processing', 'label': '处理地址', 'status': 'running', 'total': total, 'current': done, 'success': success_count}, ensure_ascii=False)}\n\n"
+                                await _asyncio.sleep(0)
 
-                yield f"data: {json.dumps({'step': 'processing', 'label': '处理地址', 'status': 'done', 'total': total, 'success': success_count}, ensure_ascii=False)}\n\n"
+                yield f"data: {json.dumps({'step': 'processing', 'label': '处理地址', 'status': 'done', 'total': total, 'current': total, 'success': success_count}, ensure_ascii=False)}\n\n"
+                await _asyncio.sleep(0)
 
                 yield f"data: {json.dumps({'step': 'saving', 'label': '保存结果', 'status': 'running'}, ensure_ascii=False)}\n\n"
+                await _asyncio.sleep(0)
 
                 address_to_result = {}
                 for addr, result in zip(addresses, results):
@@ -747,6 +926,7 @@ def create_api_app() -> FastAPI:
                 province_list = []
                 city_list = []
                 district_list = []
+                precision_level_list = []
                 status_list = []
 
                 for addr in df[column]:
@@ -756,11 +936,17 @@ def create_api_app() -> FastAPI:
                         longitude_list.append(result.get("longitude"))
                         latitude_list.append(result.get("latitude"))
                         source_list.append(result.get("source"))
-                        formatted_address_list.append(result.get("formatted_address"))
+                        formatted_address_list.append(result.get("formatted_address") or "")
                         province_list.append(result.get("province"))
                         city_list.append(result.get("city"))
                         district_list.append(result.get("district"))
-                        status_list.append("成功")
+                        precision_level_list.append(result.get("precision_level"))
+                        if not result.get("formatted_address"):
+                            status_list.append("失败")
+                        elif _is_imprecise(result):
+                            status_list.append("精确度不足")
+                        else:
+                            status_list.append("成功")
                     elif result:
                         longitude_list.append(None)
                         latitude_list.append(None)
@@ -769,6 +955,7 @@ def create_api_app() -> FastAPI:
                         province_list.append(None)
                         city_list.append(None)
                         district_list.append(None)
+                        precision_level_list.append(None)
                         status_list.append("失败")
                     else:
                         longitude_list.append(None)
@@ -778,6 +965,7 @@ def create_api_app() -> FastAPI:
                         province_list.append(None)
                         city_list.append(None)
                         district_list.append(None)
+                        precision_level_list.append(None)
                         status_list.append("空地址" if not addr_str else "未处理")
 
                 df["longitude"] = longitude_list
@@ -787,11 +975,12 @@ def create_api_app() -> FastAPI:
                 df["province"] = province_list
                 df["city"] = city_list
                 df["district"] = district_list
+                df["precision_level"] = precision_level_list
                 df["status"] = status_list
 
                 stem = Path(filename).stem
                 csv_path = OutputPaths.CSV / f"{stem}.csv"
-                df.to_csv(csv_path, index=False, encoding="utf-8-sig")
+                actual_csv = _safe_write_csv(df, csv_path, task_id)
 
                 results_json_path = OutputPaths.PROGRESS / f"{task_id}_results.json"
                 try:
@@ -802,25 +991,99 @@ def create_api_app() -> FastAPI:
                 except Exception:
                     pass
 
+                rework_indices = []
+                for ri, r in enumerate(results):
+                    if r and r.get("success") and (
+                        not r.get("formatted_address") or _is_imprecise(r)
+                    ):
+                        rework_indices.append(ri)
+
+                rework_count = 0
+                imprecise_fixed_count = 0
+                if rework_indices:
+                    _server_log(f"发现 {len(rework_indices)} 条需返工的结果（空地址或精确度不足），开始返工")
+                    yield f"data: {json.dumps({'step': 'rework', 'label': '返工不精确结果', 'status': 'running', 'total': len(rework_indices), 'current': 0}, ensure_ascii=False)}\n\n"
+                    await _asyncio.sleep(0)
+                    loop = _asyncio.get_event_loop()
+                    for ri_idx, ri in enumerate(rework_indices):
+                        addr = addresses[ri]
+                        await loop.run_in_executor(None, geocoder.cache.delete, addr)
+                        rework_result = await loop.run_in_executor(None, geocoder._rework_geocode, addr)
+                        improved = False
+                        if rework_result and rework_result.get("success"):
+                            old_r = results[ri]
+                            old_had_addr = bool(old_r and old_r.get("formatted_address"))
+                            new_has_addr = bool(rework_result.get("formatted_address"))
+                            old_imprecise = _is_imprecise(old_r) if old_r else True
+                            new_precise = not _is_imprecise(rework_result)
+                            if not old_had_addr and new_has_addr:
+                                improved = True
+                            elif old_imprecise and new_precise and new_has_addr:
+                                improved = True
+                                imprecise_fixed_count += 1
+                            if improved:
+                                results[ri] = rework_result
+                                rework_count += 1
+                        if (ri_idx + 1) % 3 == 0 or ri_idx + 1 == len(rework_indices):
+                            yield f"data: {json.dumps({'step': 'rework', 'label': '返工不精确结果', 'status': 'running', 'total': len(rework_indices), 'current': ri_idx + 1, 'success': rework_count}, ensure_ascii=False)}\n\n"
+                            await _asyncio.sleep(0)
+
+                    if rework_count > 0:
+                        _server_log(f"返工完成 — {rework_count}/{len(rework_indices)} 条改善成功（含 {imprecise_fixed_count} 条精度提升）")
+                        address_to_result_rework = {}
+                        for addr, result in zip(addresses, results):
+                            addr_key = str(addr).strip()
+                            address_to_result_rework[addr_key] = result
+                        for col_name, field_name in [
+                            ("formatted_address", "formatted_address"),
+                            ("province", "province"), ("city", "city"),
+                            ("district", "district"), ("precision_level", "precision_level"),
+                            ("longitude", "longitude"), ("latitude", "latitude"),
+                            ("source", "source"),
+                        ]:
+                            if col_name in df.columns:
+                                vals = []
+                                for addr in df[column]:
+                                    addr_str = str(addr).strip() if pd.notna(addr) else ""
+                                    r = address_to_result_rework.get(addr_str)
+                                    vals.append(r.get(field_name) if r else None)
+                                df[col_name] = vals
+                        for row_idx, addr in enumerate(df[column]):
+                            addr_str = str(addr).strip() if pd.notna(addr) else ""
+                            r = address_to_result_rework.get(addr_str)
+                            if r and r.get("success"):
+                                if not r.get("formatted_address"):
+                                    df.at[row_idx, "status"] = "失败"
+                                elif _is_imprecise(r):
+                                    df.at[row_idx, "status"] = "精确度不足"
+                                else:
+                                    df.at[row_idx, "status"] = "成功"
+                        actual_csv = _safe_write_csv(df, csv_path, task_id)
+                        yield f"data: {json.dumps({'step': 'saving', 'label': '返工结果已保存', 'status': 'done', 'csv': str(actual_csv), 'rework_count': rework_count}, ensure_ascii=False)}\n\n"
+                        await _asyncio.sleep(0)
+
                 from .map_visualizer import create_map
-                valid_results = [r for r in results if r.get("success")]
+                valid_for_map = [r for r in results if r.get("success") and r.get("formatted_address") and not _is_imprecise(r)]
                 map_path = OutputPaths.MAP / f"{stem}_map.html"
-                if valid_results:
-                    create_map(valid_results, str(map_path))
+                if valid_for_map:
+                    create_map(valid_for_map, str(map_path))
 
                 completed_at = time.time()
+                success_count = sum(1 for r in results if r and r.get("success") and r.get("formatted_address") and not _is_imprecise(r))
                 _persist_task(task_id, {
                     "task_id": task_id, "status": "done", "input_file": filename,
                     "column": column, "city": city, "total": total,
                     "success": success_count, "failed": total - success_count,
-                    "csv_output": str(csv_path),
-                    "map_output": str(map_path) if valid_results else None,
+                    "csv_output": str(actual_csv),
+                    "map_output": str(map_path) if valid_for_map else None,
                     "started_at": started_at, "completed_at": completed_at,
                     "duration_sec": round(completed_at - started_at, 1),
+                    "rework_count": rework_count,
                     "error": None,
                 })
 
-                yield f"data: {json.dumps({'step': 'saving', 'label': '保存结果', 'status': 'done', 'csv': str(csv_path), 'map': str(map_path)}, ensure_ascii=False)}\n\n"
+                yield f"data: {json.dumps({'step': 'saving', 'label': '保存结果', 'status': 'done', 'csv': str(actual_csv), 'map': str(map_path) if valid_for_map else None}, ensure_ascii=False)}\n\n"
+                await _asyncio.sleep(0)
                 _server_log(f"SSE 批量编码完成 — {success_count}/{total} 成功, 耗时 {completed_at - started_at:.1f}s")
                 yield "data: [DONE]\n\n"
 
@@ -833,6 +1096,7 @@ def create_api_app() -> FastAPI:
                     "completed_at": time.time(), "error": str(e),
                 })
                 yield f"data: {json.dumps({'error': str(e)}, ensure_ascii=False)}\n\n"
+                await _asyncio.sleep(0)
 
         return StreamingResponse(
             generate_progress(),
@@ -1393,8 +1657,8 @@ def create_api_app() -> FastAPI:
 
     @app.post("/api/open/directory")
     async def open_directory(req: Request):
-        import sys
         import subprocess
+        import sys
 
         body = await req.json()
         dir_type = body.get("type", "").strip()

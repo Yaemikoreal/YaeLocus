@@ -6,6 +6,7 @@
 
 import pytest
 from geocode.validation import ConfidenceValidator, ConfidenceScore, CrossProvinceChecker
+from geocode.validation.confidence import is_imprecise_result, IMPRECISE_LEVELS
 
 
 class TestConfidenceValidator:
@@ -320,3 +321,105 @@ class TestIntegration:
 
         assert score.is_trustworthy is True
         assert score.total >= 60
+
+
+class TestPrecisionLevel:
+    """精度级别判断测试"""
+
+    def test_province_level_not_trustworthy(self):
+        """省份级别结果不可信"""
+        validator = ConfidenceValidator()
+        result = {
+            "province": "四川省",
+            "city": None,
+            "district": None,
+            "formatted_address": "四川省",
+            "latitude": 30.5,
+            "longitude": 104.0,
+            "precision_level": "省份",
+        }
+        score = validator.validate("四川省某路", result)
+        assert not score.is_trustworthy
+        assert any("精确度不足" in issue for issue in score.issues)
+
+    def test_city_level_not_trustworthy(self):
+        """城市级别结果不可信"""
+        validator = ConfidenceValidator()
+        result = {
+            "province": "四川省",
+            "city": "眉山市",
+            "district": None,
+            "formatted_address": "四川省眉山市",
+            "latitude": 30.0,
+            "longitude": 103.8,
+            "precision_level": "城市",
+        }
+        score = validator.validate("眉山市某路", result)
+        assert not score.is_trustworthy
+        assert any("精确度不足" in issue for issue in score.issues)
+
+    def test_district_level_not_trustworthy(self):
+        """区县级别结果不可信"""
+        validator = ConfidenceValidator()
+        result = {
+            "province": "四川省",
+            "city": "眉山市",
+            "district": "东坡区",
+            "formatted_address": "四川省眉山市东坡区",
+            "latitude": 30.0,
+            "longitude": 103.8,
+            "precision_level": "区县",
+        }
+        score = validator.validate("东坡区某路", result)
+        assert not score.is_trustworthy
+        assert any("精确度不足" in issue for issue in score.issues)
+
+    def test_street_level_trustworthy(self):
+        """街道级别结果可信"""
+        validator = ConfidenceValidator()
+        result = {
+            "province": "四川省",
+            "city": "眉山市",
+            "district": "东坡区",
+            "formatted_address": "四川省眉山市东坡区某某路88号",
+            "latitude": 30.0,
+            "longitude": 103.8,
+            "precision_level": "门牌号",
+        }
+        score = validator.validate("东坡区某某路88号", result)
+        assert score.is_trustworthy
+
+    def test_is_imprecise_result_with_level(self):
+        """is_imprecise_result 辅助函数 - 有 precision_level"""
+        assert is_imprecise_result({"success": True, "precision_level": "省份", "formatted_address": "x"})
+        assert is_imprecise_result({"success": True, "precision_level": "城市", "formatted_address": "x"})
+        assert is_imprecise_result({"success": True, "precision_level": "区县", "formatted_address": "x"})
+        assert not is_imprecise_result({"success": True, "precision_level": "街道", "formatted_address": "x"})
+        assert not is_imprecise_result({"success": True, "precision_level": "门牌号", "formatted_address": "x"})
+
+    def test_is_imprecise_result_no_level_no_district(self):
+        """is_imprecise_result - 无 precision_level 且无 district"""
+        result = {
+            "success": True,
+            "formatted_address": "四川省眉山市",
+            "province": "四川省",
+            "city": "眉山市",
+            "district": None,
+        }
+        assert is_imprecise_result(result)
+
+    def test_is_imprecise_result_no_level_has_district(self):
+        """is_imprecise_result - 无 precision_level 但有 district"""
+        result = {
+            "success": True,
+            "formatted_address": "四川省眉山市东坡区某某路12号",
+            "province": "四川省",
+            "city": "眉山市",
+            "district": "东坡区",
+        }
+        assert not is_imprecise_result(result)
+
+    def test_failed_result_not_imprecise(self):
+        """失败结果不算精确度不足"""
+        assert not is_imprecise_result({"success": False})
+        assert not is_imprecise_result(None)

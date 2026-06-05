@@ -2,7 +2,7 @@
 数据模型定义
 """
 
-from dataclasses import dataclass, field, asdict
+from dataclasses import asdict, dataclass
 from typing import Optional
 
 
@@ -18,6 +18,7 @@ class GeocodeResult:
     district: Optional[str] = None
     source: str = ""  # amap, tianditu, baidu
     coordinate_system: str = ""  # GCJ-02, BD-09, CGCS2000
+    precision_level: Optional[str] = None
     original_lat: Optional[float] = None
     original_lon: Optional[float] = None
     success: bool = True

@@ -4,7 +4,7 @@
 
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Version: 1.6.0](https://img.shields.io/badge/version-1.6.0-green.svg)](https://github.com/Yaemikoreal/YaeLocus)
+[![Version: 1.7.0](https://img.shields.io/badge/version-1.7.0-green.svg)](https://github.com/Yaemikoreal/YaeLocus)
 [![PyPI](https://img.shields.io/badge/pypi-yaelocus-blue.svg)](https://pypi.org/project/yaelocus/)
 [![Ink TUI](https://img.shields.io/badge/TUI-Ink%20%2B%20React-9cf.svg)](https://github.com/vadimdemedes/ink)
 [![FastAPI](https://img.shields.io/badge/API-FastAPI-009688.svg)](https://fastapi.tiangolo.com/)
@@ -28,7 +28,14 @@ A geocoding tool based on multi-API hybrid calls, supporting batch address conve
 - **Interactive Maps**: Point clustering + heatmap + route visualization (Folium + Amap tiles)
 - **Map Generation**: Batch result maps, route maps, AI analysis panels
 
-### New Features (v1.6.0)
+### New Features (v1.7.0)
+- **Geocoding Precision Enhancement**: New precision level detection, province/city/district level results auto-marked as untrustworthy
+- **Smart Retry Strategy**: Single address encoding continues trying other APIs if first result has insufficient confidence
+- **Batch Encoding Field Expansion**: Batch results now include formatted_address, province/city/district, precision level, status fields
+- **CSV Write Safety Mechanism**: File lock + retry (3 times) + fallback path, prevents concurrent write conflicts
+- **Cache Corruption Recovery Enhancement**: Corrupted database auto-backup (`.corrupted.{timestamp}`) before rebuild
+
+### Previous Version (v1.6.0)
 - **Route Planning**: Multi-mode route planning (walking/driving/transit), supports AI engine and API engine
 - **Itinerary Optimization**: DBSCAN clustering + TSP solver, multi-strategy route recommendations
 - **AI Features**: Integrated DeepSeek/Qwen/GLM/Moonshot, supports data analysis and route planning conversations
@@ -240,7 +247,7 @@ Auto-select when running `yaelocus` without arguments:
 ```
 geocode-tool/
 ├── geocode/                  # Core modules
-│   ├── __init__.py           # Public API export (__version__ = "1.6.0")
+│   ├── __init__.py           # Public API export (__version__ = "1.7.0")
 │   ├── geocoder.py           # Geocoding core
 │   ├── cache.py              # SQLite cache (WAL + delayed commit)
 │   ├── config.py             # API keys + OutputPaths

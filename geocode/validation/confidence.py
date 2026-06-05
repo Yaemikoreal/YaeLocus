@@ -15,6 +15,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
+IMPRECISE_LEVELS = {"省份", "城市", "区县"}
+
 # 中国境内大致范围
 CHINA_LAT_MIN = 18.0
 CHINA_LAT_MAX = 54.0
@@ -72,6 +74,18 @@ class ConfidenceValidator:
 
         total = address_match + completeness + coord_valid
         is_trustworthy = total >= self.TRUST_THRESHOLD
+
+        if not result.get("formatted_address"):
+            is_trustworthy = False
+            if "formatted_address缺失" not in issues:
+                issues.append("formatted_address缺失")
+
+        precision_level = result.get("precision_level")
+        if precision_level in IMPRECISE_LEVELS:
+            is_trustworthy = False
+            msg = f"精确度不足：仅到{precision_level}级"
+            if msg not in issues:
+                issues.append(msg)
 
         return ConfidenceScore(
             total=round(total, 1),
@@ -157,3 +171,22 @@ def is_in_china(lat: float, lon: float) -> bool:
     """检查坐标是否在中国境内"""
     return (CHINA_LAT_MIN <= lat <= CHINA_LAT_MAX and
             CHINA_LON_MIN <= lon <= CHINA_LON_MAX)
+
+
+def is_imprecise_result(result: dict) -> bool:
+    """判断结果精确度是否不足（仅到省/市/区县级）"""
+    if not result or not result.get("success"):
+        return False
+    precision_level = result.get("precision_level")
+    if precision_level in IMPRECISE_LEVELS:
+        return True
+    if precision_level and precision_level not in IMPRECISE_LEVELS:
+        return False
+    if not result.get("district"):
+        formatted = result.get("formatted_address") or ""
+        keywords = set(re.findall(r'[一-龥]{2,}', formatted))
+        street_keywords = {"路", "街", "巷", "弄", "号", "栋", "楼", "村", "镇", "乡",
+                           "园区", "开发区", "大厦", "广场", "小区", "市场", "中心", "大学", "医院", "学校"}
+        if not any(k.endswith(sk) or sk in k for k in keywords for sk in street_keywords):
+            return True
+    return False

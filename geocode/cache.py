@@ -13,7 +13,9 @@
 
 import atexit
 import json
+import logging
 import queue
+import shutil
 import threading
 import time
 from collections import OrderedDict
@@ -21,6 +23,8 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from .config import OutputPaths
+
+logger = logging.getLogger(__name__)
 
 
 class CacheManager:
@@ -110,7 +114,7 @@ class CacheManager:
 
     def _get_db(self):
         from .db import DatabaseManager
-        return DatabaseManager.get_instance()
+        return DatabaseManager.get_instance(str(self._path))
 
     def _init_db(self) -> None:
         try:
@@ -145,6 +149,16 @@ class CacheManager:
                 })
             except Exception:
                 pass
+
+        backup_path = Path(str(self._path) + ".corrupted." + str(int(time.time())))
+        for suffix in ['', '-wal', '-shm']:
+            src = Path(str(self._path) + suffix)
+            if src.exists():
+                try:
+                    dst = Path(str(backup_path) + suffix)
+                    shutil.copy2(str(src), str(dst))
+                except Exception:
+                    pass
 
         for suffix in ['', '-wal', '-shm']:
             p = Path(str(self._path) + suffix)
@@ -228,27 +242,61 @@ class CacheManager:
 
     def _persist_thread_main(self) -> None:
         import sqlite3
-        self._persist_conn = sqlite3.connect(str(self._path), timeout=30)
-        self._persist_conn.execute("PRAGMA journal_mode=WAL")
-        self._persist_conn.execute("PRAGMA synchronous=NORMAL")
-        self._persist_conn.execute("PRAGMA busy_timeout=30000")
-        self._persist_conn.row_factory = sqlite3.Row
-        self._conn = self._persist_conn
+        try:
+            self._persist_conn = sqlite3.connect(str(self._path), timeout=30)
+            self._persist_conn.execute("PRAGMA journal_mode=WAL")
+            self._persist_conn.execute("PRAGMA synchronous=NORMAL")
+            self._persist_conn.execute("PRAGMA busy_timeout=30000")
+            self._persist_conn.row_factory = sqlite3.Row
+            self._conn = self._persist_conn
 
-        # 确保表结构存在
-        self._persist_conn.executescript(self.INIT_SQL)
-        # 迁移旧表结构（添加缺失的扩展字段）
-        self._migrate_table_schema()
-
-        self._persist_loop()
-
-        if self._persist_conn:
             try:
-                self._persist_conn.close()
+                self._persist_conn.execute(
+                    "CREATE TABLE IF NOT EXISTS cache ("
+                    "key TEXT PRIMARY KEY, address TEXT, data TEXT NOT NULL, "
+                    "created_at REAL, expires_at REAL, source TEXT)"
+                )
             except Exception:
                 pass
-        self._persist_conn = None
-        self._conn = None
+
+            self._migrate_table_schema()
+
+            try:
+                self._persist_conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_expires ON cache(expires_at)"
+                )
+            except sqlite3.OperationalError:
+                pass
+            try:
+                self._persist_conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_last_accessed ON cache(last_accessed)"
+                )
+            except sqlite3.OperationalError:
+                pass
+
+            self._persist_loop()
+        except Exception:
+            logger.error("缓存持久化线程异常退出，数据可能丢失", exc_info=True)
+            try:
+                remaining = []
+                while True:
+                    try:
+                        item = self._write_queue.get_nowait()
+                        remaining.append(item)
+                    except queue.Empty:
+                        break
+                if remaining:
+                    logger.warning("持久化线程退出时队列中仍有 %d 条未写入数据", len(remaining))
+            except Exception:
+                pass
+        finally:
+            if self._persist_conn:
+                try:
+                    self._persist_conn.close()
+                except Exception:
+                    pass
+            self._persist_conn = None
+            self._conn = None
 
     def _migrate_table_schema(self) -> None:
         """自动添加缺失的扩展字段（兼容旧数据库）"""
@@ -396,7 +444,23 @@ class CacheManager:
                 else:
                     # 已存在，比较置信度
                     old_confidence = row[0] if row else 0  # row[0] 是 confidence 列
-                    if new_confidence >= old_confidence:
+
+                    new_has_formatted = bool(data.get('formatted_address')) if data else False
+                    should_replace = new_confidence >= old_confidence
+
+                    if not should_replace and new_has_formatted:
+                        try:
+                            old_row = self._persist_conn.execute(
+                                "SELECT data FROM cache WHERE key = ?", (key,)
+                            ).fetchone()
+                            if old_row:
+                                old_data = json.loads(old_row[0])
+                                if not old_data.get('formatted_address'):
+                                    should_replace = True
+                        except Exception:
+                            pass
+
+                    if should_replace:
                         # 新数据置信度 >= 旧数据，全字段替换
                         self._persist_conn.execute(
                             "UPDATE cache SET address=?, data=?, source=?, formatted_address=?, "
@@ -542,12 +606,16 @@ class CacheManager:
             self._shutdown_event.set()
             if self._persist_thread:
                 self._persist_thread.join(timeout=5)
-            self._flush_remaining()
-            if self._persist_conn:
-                try:
-                    self._persist_conn.close()
-                except Exception:
-                    pass
+        if self._persist_conn is not None:
+            try:
+                self._flush_remaining()
+            except Exception:
+                logger.warning("紧急刷新时写入失败", exc_info=True)
+            try:
+                self._persist_conn.close()
+            except Exception:
+                pass
+            self._persist_conn = None
 
     @staticmethod
     def _normalize_key(address: str) -> str:

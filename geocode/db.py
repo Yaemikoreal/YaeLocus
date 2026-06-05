@@ -12,6 +12,7 @@
 - Cache Stats Daily 统计持久化
 """
 
+import logging
 import sqlite3
 import threading
 import time
@@ -20,6 +21,8 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from .config import Config, OutputPaths
+
+logger = logging.getLogger(__name__)
 
 CURRENT_SCHEMA_VERSION = 2
 
@@ -118,6 +121,7 @@ TASK_NEW_INDEXES = [
 
 class DatabaseManager:
     _instance: Optional["DatabaseManager"] = None
+    _instances_by_path: Dict[str, "DatabaseManager"] = {}
     _lock = threading.Lock()
 
     def __init__(self, db_path: str = None):
@@ -128,16 +132,27 @@ class DatabaseManager:
         self._ensure_schema()
 
     @classmethod
-    def get_instance(cls) -> "DatabaseManager":
-        if cls._instance is None:
+    def get_instance(cls, db_path: str = None) -> "DatabaseManager":
+        if db_path is None:
+            if cls._instance is None:
+                with cls._lock:
+                    if cls._instance is None:
+                        cls._instance = cls()
+            return cls._instance
+        resolved = str(Path(db_path).resolve())
+        if resolved not in cls._instances_by_path:
             with cls._lock:
-                if cls._instance is None:
-                    cls._instance = cls()
-        return cls._instance
+                if resolved not in cls._instances_by_path:
+                    inst = cls(db_path)
+                    cls._instances_by_path[resolved] = inst
+                    if cls._instance is None:
+                        cls._instance = inst
+        return cls._instances_by_path[resolved]
 
     @classmethod
     def reset_instance(cls) -> None:
         cls._instance = None
+        cls._instances_by_path = {}
 
     def _new_connection(self) -> sqlite3.Connection:
         conn = sqlite3.connect(str(self._path), timeout=30)
@@ -178,10 +193,40 @@ class DatabaseManager:
             return 0
 
     def _ensure_schema(self) -> None:
-        with self.connection() as conn:
-            version = self._get_current_version(conn)
-            if version < CURRENT_SCHEMA_VERSION:
-                self._migrate(conn, version)
+        try:
+            with self.connection() as conn:
+                version = self._get_current_version(conn)
+                if version < CURRENT_SCHEMA_VERSION:
+                    self._migrate(conn, version)
+        except sqlite3.DatabaseError:
+            logger.warning("数据库损坏，尝试恢复: %s", self._path, exc_info=True)
+            self._recover_database()
+
+    def _recover_database(self) -> None:
+        import shutil
+        backup_path = Path(str(self._path) + ".corrupted." + str(int(time.time())))
+        for suffix in ['', '-wal', '-shm']:
+            src = Path(str(self._path) + suffix)
+            if src.exists():
+                try:
+                    dst = Path(str(backup_path) + suffix)
+                    shutil.copy2(str(src), str(dst))
+                except Exception:
+                    pass
+        for suffix in ['', '-wal', '-shm']:
+            p = Path(str(self._path) + suffix)
+            if p.exists():
+                for _ in range(3):
+                    try:
+                        p.unlink()
+                        break
+                    except PermissionError:
+                        time.sleep(0.1)
+        try:
+            with self.connection() as conn:
+                self._migrate(conn, 0)
+        except Exception:
+            logger.error("数据库恢复后重建schema失败", exc_info=True)
 
     def _migrate(self, conn: sqlite3.Connection, from_version: int) -> None:
         if from_version < 1:

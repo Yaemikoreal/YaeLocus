@@ -309,7 +309,7 @@ class Config:
     API_MAX_CONCURRENT = {
         "amap": 0,
         "tianditu": 0,
-        "baidu": 3,
+        "baidu": 2,
     }
 
     # 并发地理编码配置

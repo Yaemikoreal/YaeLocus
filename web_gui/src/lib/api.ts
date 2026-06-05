@@ -180,8 +180,17 @@ export function batchGeocodeStream(
               results.push(parsed.data);
               onResult(parsed.data);
             }
-            if (parsed.current !== undefined && parsed.total !== undefined) {
-              onProgress(parsed);
+            if (parsed.total !== undefined) {
+              onProgress({
+                step: parsed.step || '',
+                label: parsed.label || '',
+                status: parsed.status || '',
+                total: parsed.total,
+                current: parsed.current !== undefined
+                  ? parsed.current
+                  : (parsed.status === 'done' ? parsed.total : 0),
+                success: parsed.success || 0,
+              });
             }
           } catch {
             // skip non-JSON lines
