@@ -4,7 +4,7 @@
 
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Version: 1.6.0](https://img.shields.io/badge/version-1.6.0-green.svg)](https://github.com/Yaemikoreal/YaeLocus)
+[![Version: 1.7.0](https://img.shields.io/badge/version-1.7.0-green.svg)](https://github.com/Yaemikoreal/YaeLocus)
 [![PyPI](https://img.shields.io/badge/pypi-yaelocus-blue.svg)](https://pypi.org/project/yaelocus/)
 [![Ink TUI](https://img.shields.io/badge/TUI-Ink%20%2B%20React-9cf.svg)](https://github.com/vadimdemedes/ink)
 [![FastAPI](https://img.shields.io/badge/API-FastAPI-009688.svg)](https://fastapi.tiangolo.com/)
@@ -28,9 +28,16 @@
 - **交互式地图**: 点聚类 + 热力图 + 路线可视化（Folium + 高德瓦片）
 - **地图生成**: 批量结果地图、路线地图、AI 分析面板
 
-### 新增功能 (v1.6.0)
+### 新增功能 (v1.7.0)
+- **地理编码精度增强**: 新增精确度级别检测（省/市/区县级结果自动标记为不可信）
+- **智能重试策略**: 单地址编码时，首个 API 结果置信度不足会继续尝试其他 API 以获取最优结果
+- **批量编码字段扩展**: 批量结果新增 formatted_address、省市区、精确度级别、状态等字段
+- **CSV 写入安全机制**: 文件锁 + 重试 + 备用路径回退，避免并发写入冲突
+- **缓存损坏恢复增强**: 损坏数据库自动备份后再重建，防止数据丢失
+
+### 历史版本 (v1.6.0)
 - **路线规划**: 多模式路线规划（步行/驾车/公交），支持 AI 引擎和 API 引擎
-- **行程优化**: DBSCAN 聘类分析 + TSP 求解器，多策略路线推荐
+- **行程优化**: DBSCAN 聚类分析 + TSP 求解器，多策略路线推荐
 - **AI 功能**: 集成 DeepSeek/Qwen/GLM/Moonshot，支持数据分析和路线规划对话
 - **Ink TUI**: React + Ink 5 终端界面，通过 FastAPI 与 Python 后端通信
 - **API 服务器**: FastAPI headless 服务，支持 SSE 流式响应
@@ -240,7 +247,7 @@ response = client.chat("分析这些地点的分布特征", context=str(valid))
 ```
 geocode-tool/
 ├── geocode/                  # 核心模块
-│   ├── __init__.py           # 公共 API 导出 (__version__ = "1.6.0")
+│   ├── __init__.py           # 公共 API 导出 (__version__ = "1.7.0")
 │   ├── geocoder.py           # 地理编码核心
 │   ├── cache.py              # SQLite 缓存（WAL + 延迟提交）
 │   ├── config.py             # API 密钥 + OutputPaths

@@ -836,8 +836,14 @@ class ReplSession:
         full = ""
         last_flush = 0.0
         try:
-            for token in self._ai_client_ref.chat_stream(messages=messages, temperature=0.7, max_tokens=2000):
-                full += token
+            for chunk in self._ai_client_ref.chat_stream(messages=messages, temperature=0.7, max_tokens=2000):
+                if isinstance(chunk, dict):
+                    text = chunk.get("content", "")
+                    if chunk.get("type") == "reasoning":
+                        continue
+                else:
+                    text = str(chunk)
+                full += text
                 now = time.time()
                 if now - last_flush > 0.05:
                     self.messages[self._streaming_msg_idx].content = full
@@ -896,55 +902,129 @@ class ReplSession:
         return result
 
     def _agent_loop(self, text: str):
-        """Agent 主循环（借鉴 Claude Code query.ts: needsFollowUp flag 控制循环）"""
-        from ..ai.system_prompt import build_system_prompt
+        """Agent 主循环 — 使用统一 AgentLoop 类"""
+        from ..ai.agent_loop import AgentLoop
+
         context = self._build_context()
-        messages: list[dict] = [
-            {"role": "system", "content": build_system_prompt()},
-            *context,
-            {"role": "user", "content": text},
-        ]
         self._ai_active = True
 
         try:
-            max_rounds = 4
-            for round_idx in range(max_rounds):
-                full = self._ai_stream(messages)
-                if self._live:
-                    self._refresh_all()
-                    self._live.refresh()
+            loop = AgentLoop(
+                client=self._ai_client_ref,
+                max_rounds=4,
+                use_tools=True,
+            )
 
-                # 提取 [CMD]...[/CMD] 块（借鉴 query.ts: filter tool_use blocks）
-                cmd_blocks = re.findall(r'\[CMD\]\s*\n?(.*?)\n?\s*\[/CMD\]', full, re.DOTALL | re.IGNORECASE)
-                if not cmd_blocks:
-                    break  # needsFollowUp = false → 退出循环
+            for event in loop.run(prompt=text, context=context):
+                if not self._ai_active:
+                    loop.cancel()
+                    break
 
-                # 执行命令并收集结果（借鉴 query.ts: tool_result 以 user role 注入）
-                results = []
-                for i, cmd in enumerate(cmd_blocks):
-                    cmd = cmd.strip()
-                    if not cmd:
-                        continue
-                    self._add_message(Message(role="system", content=f"执行: [cyan]{cmd}[/cyan]", markup=True))
+                event_type = event.get("type", "")
+
+                if event_type == "content":
+                    if self._streaming_msg_idx >= 0 and self._streaming_msg_idx < len(self.messages):
+                        msg = self.messages[self._streaming_msg_idx]
+                        msg.content += event.get("content", "")
+                        msg.streaming = True
+                        self._refresh_all()
+                        if self._live:
+                            self._live.refresh()
+
+                elif event_type == "reasoning":
+                    pass
+
+                elif event_type == "tool_use":
+                    cmd_name = event.get("name", "")
+                    args = event.get("arguments", "")
+                    self._add_message(Message(
+                        role="system",
+                        content=f"执行: [cyan]{cmd_name}[/cyan] {args[:50]}",
+                        markup=True,
+                    ))
                     self._refresh_all()
                     if self._live:
                         self._live.refresh()
-                    result_text = self._execute_cmd(cmd)
-                    results.append((i + 1, result_text))
 
-                if not results:
+                elif event_type == "tool_result":
+                    cmd = event.get("command", "")
+                    result = event.get("result", "")
+                    success = event.get("success", True)
+                    status = "" if success else " [red](失败)[/red]"
+                    self._add_message(Message(
+                        role="system",
+                        content=f"结果: [cyan]{cmd}[/cyan]{status}",
+                        markup=True,
+                    ))
+                    self._refresh_all()
+                    if self._live:
+                        self._live.refresh()
+
+                elif event_type == "tool_error":
+                    err = event.get("error", {})
+                    recoverable = event.get("recoverable", False)
+                    auto_fix = event.get("auto_fix_action")
+                    msg_parts = [f"错误: {err.get('message', '未知')}"]
+                    if recoverable and auto_fix:
+                        msg_parts.append(f"[green]自动修复: {auto_fix}[/green]")
+                    self._add_message(Message(
+                        role="error",
+                        content="\n".join(msg_parts),
+                        markup=True,
+                    ))
+                    self._refresh_all()
+                    if self._live:
+                        self._live.refresh()
+
+                elif event_type == "tool_recovery":
+                    fix_cmd = event.get("fix_command")
+                    if fix_cmd:
+                        self._add_message(Message(
+                            role="system",
+                            content=f"[green]自动修复: {fix_cmd}[/green]",
+                            markup=True,
+                        ))
+                        self._refresh_all()
+
+                elif event_type == "round_start":
+                    round_num = event.get("round", 0)
+                    self._add_message(Message(
+                        role="system",
+                        content=f"[dim]Agent 第 {round_num} 轮[/dim]",
+                        markup=True,
+                    ))
+
+                elif event_type == "error":
+                    err_code = event.get("code", "unknown")
+                    err_msg = event.get("message", "未知错误")
+                    err_names = {
+                        "auth_error": "AI 认证失败",
+                        "rate_limit": "请求过于频繁",
+                        "network_error": "网络连接失败",
+                        "timeout": "请求超时",
+                    }
+                    self._add_message(Message(
+                        role="error",
+                        content=err_names.get(err_code, f"AI 错误: {err_msg}"),
+                    ))
+                    self._refresh_all()
+                    if self._live:
+                        self._live.refresh()
                     break
 
-                combined = "\n".join(
-                    f"[命令执行结果 {idx}]:\n{r}" for idx, r in results
-                )
-                messages.append({"role": "assistant", "content": full})
-                messages.append({"role": "user", "content": combined})
+                elif event_type == "done":
+                    break
+
+            if self._streaming_msg_idx >= 0 and self._streaming_msg_idx < len(self.messages):
+                self.messages[self._streaming_msg_idx].streaming = False
+
         finally:
             self._ai_active = False
             if self._ai_client_ref:
-                try: self._ai_client_ref.close()
-                except Exception: pass
+                try:
+                    self._ai_client_ref.close()
+                except Exception:
+                    pass
                 self._ai_client_ref = None
 
     def _chat_with_ai(self, text: str):

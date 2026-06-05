@@ -72,6 +72,7 @@ export function App() {
 
   const [messages, setMessages] = useState<MessageData[]>([]);
   const [streamingText, setStreamingText] = useState<string | null>(null);
+  const [streamingReasoning, setStreamingReasoning] = useState<string | null>(null);
   const [health, setHealth] = useState<HealthStatus | null>(null);
   const [processing, setProcessing] = useState(false);
   const [modal, setModal] = useState<'help' | 'map_picker' | null>(null);
@@ -159,18 +160,16 @@ export function App() {
     }
   }, [api]);
 
-  // ── AI Agent 循环 ───────────────────────────────────────────
+// ── AI Agent 循环 ───────────────────────────────────────────
 
   const SSE_CHUNK_TIMEOUT_MS = 30000
 
   const agentLoop = useCallback(async (prompt: string, fileContext?: string) => {
     setProcessing(true);
 
-    // 创建 AbortController (BUG #3 修复)
     const controller = new AbortController();
     abortRef.current = controller;
 
-    // 构建上下文 (BUG #12 修复: 包含 tool 消息)
     const context: ChatMessage[] = [];
     for (const msg of messages.slice(-30)) {
       if (msg.role === 'user' && msg.content) {
@@ -192,66 +191,80 @@ export function App() {
       } catch { /* ignore */ }
     }
 
-    const MAX_ROUNDS = 4;
-    const apiMessages: ChatMessage[] = [
-      ...context,
-      { role: 'user', content: fullPrompt },
-    ];
+    let fullContent = '';
+    let fullReasoning = '';
 
-    const roundStart = Date.now();
+    try {
+      const res = await api.agentStream(fullPrompt, context);
+      const reader = res.body?.getReader();
+      if (!reader) throw new Error('No response body');
 
-    for (let round = 0; round < MAX_ROUNDS; round++) {
-      if (controller.signal.aborted) break;
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let lastChunkTime = Date.now();
 
-      // 流式文本独立渲染 — 不在消息数组中
-      setStreamingText('');
+      while (true) {
+        if (Date.now() - lastChunkTime > SSE_CHUNK_TIMEOUT_MS) {
+          addMessage({ role: 'error', content: 'AI 响应超时，请检查网络连接后重试' });
+          break;
+        }
 
-      let fullContent = '';
+        if (controller.signal.aborted) {
+          reader.cancel();
+          break;
+        }
 
-      try {
-        const res = await api.chatStream(fullPrompt, context);
-        const reader = res.body?.getReader();
-        if (!reader) throw new Error('No response body');
+        const { done, value } = await reader.read();
+        if (done) break;
+        lastChunkTime = Date.now();
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
 
-        const decoder = new TextDecoder();
-        let buffer = '';
-        let lastChunkTime = Date.now();
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed || !trimmed.startsWith('data: ')) continue;
+          const data = trimmed.slice(6);
+          if (data === '[DONE]') break;
+          try {
+            const event = JSON.parse(data);
 
-        while (true) {
-          // Check chunk timeout
-          if (Date.now() - lastChunkTime > SSE_CHUNK_TIMEOUT_MS) {
-            addMessage({
-              role: 'error',
-              content: 'AI 响应超时，请检查网络连接后重试',
-            });
-            break;
-          }
-
-          if (controller.signal.aborted) {
-            reader.cancel();
-            break;
-          }
-          const { done, value } = await reader.read();
-          if (done) break;
-          lastChunkTime = Date.now();
-          buffer += decoder.decode(value, { stream: true });
-          const lines = buffer.split('\n');
-          buffer = lines.pop() || '';
-
-          for (const line of lines) {
-            const trimmed = line.trim();
-            if (!trimmed || !trimmed.startsWith('data: ')) continue;
-            const data = trimmed.slice(6);
-            if (data === '[DONE]') break;
-            try {
-              const parsed = JSON.parse(data);
-              if (parsed.token) {
-                fullContent += parsed.token;
+            switch (event.type) {
+              case 'content':
+                fullContent += event.content || '';
                 setStreamingText(fullContent);
-              }
-              if (parsed.error) {
+                break;
+              case 'reasoning':
+                fullReasoning += event.content || '';
+                setStreamingReasoning(fullReasoning.length > 200 ? '◌ ' + fullReasoning.slice(-200) : fullReasoning);
+                break;
+              case 'tool_use':
+                fullContent += `\n⏳ 执行: ${event.name || 'command'}...\n`;
+                setStreamingText(fullContent);
+                break;
+              case 'tool_result':
+                fullContent += `\n✓ ${event.command || ''}${event.success === false ? ' (失败)' : ''}\n`;
+                if (event.result) {
+                  const resultText = event.result.length > 2000 ? event.result.slice(0, 2000) + '...' : event.result;
+                  fullContent += `\`\`\`\n${resultText}\n\`\`\`\n`;
+                }
+                setStreamingText(fullContent);
+                break;
+              case 'tool_error':
+                fullContent += `\n✗ ${event.command || ''} — ${event.error?.message || '错误'}${event.recoverable ? ' (自动恢复中...)' : ''}\n`;
+                setStreamingText(fullContent);
+                break;
+              case 'tool_recovery':
+                fullContent += `\n⟳ ${event.fix_command ? `自动修复: ${event.fix_command}` : `等待 ${event.wait_seconds}s 后重试...`}\n`;
+                setStreamingText(fullContent);
+                break;
+              case 'round_start':
+                // Round info is shown via streamingText
+                break;
+              case 'error': {
                 setStreamingText(null);
-                const errCode = parsed.code || 'unknown';
+                setStreamingReasoning(null);
+                const errCode = event.code || 'unknown';
                 const errMap: Record<string, string> = {
                   auth_error: 'AI 认证失败，请检查 API Key 配置',
                   rate_limit: 'AI 请求过于频繁，请稍后重试',
@@ -260,95 +273,41 @@ export function App() {
                 };
                 addMessage({
                   role: 'error',
-                  content: errMap[errCode] || `AI 错误: ${parsed.error}`,
+                  content: errMap[errCode] || `AI 错误: ${event.message || errCode}`,
                 });
                 break;
               }
-            } catch { /* skip malformed JSON */ }
-          }
+            }
+          } catch { /* skip malformed JSON */ }
         }
-      } catch (err: unknown) {
-        if (controller.signal.aborted) break;
+      }
+    } catch (err: unknown) {
+      if (controller.signal.aborted) { /* cancelled */ }
+      else {
         setStreamingText(null);
+        setStreamingReasoning(null);
         addMessage({
           role: 'error',
           content: `AI 错误: ${err instanceof Error ? err.message : String(err)}`,
         });
-        break;
       }
-
-      // 剥离 [CMD] 协议块，只保留纯文本回复
-      const cmdRegex = /\[CMD\]\s*\n?(.*?)\n?\s*\[\/CMD\]/gs;
-      const cmds: string[] = [];
-      const visibleContent = fullContent.replace(cmdRegex, (_m, c) => {
-        if (c.trim()) cmds.push(c.trim());
-        return '';
-      }).trim();
-
-      // 流式完成 → 转为正式消息
-      setStreamingText(null);
-      if (visibleContent) {
-        addMessage({ role: 'assistant', content: visibleContent });
-      }
-
-      if (cmds.length === 0) break;
-
-      // 单个工具消息 + 计时器
-      const startTime = Date.now();
-      const toolMsgId = addMessage({
-        role: 'tool',
-        content: '',
-        toolCommand: '处理中... (0s)',
-        toolStatus: 'running',
-      }).id;
-
-      const timer = setInterval(() => {
-        const elapsed = Math.round((Date.now() - startTime) / 1000);
-        setMessages(prev => {
-          const idx = prev.findIndex(m => m.id === toolMsgId);
-          if (idx === -1) return prev;
-          const next = [...prev];
-          next[idx] = { ...next[idx], toolCommand: `处理中... (${elapsed}s)` };
-          return next;
-        });
-      }, 1000);
-
-      let allOk = true;
-      let lastErr = '';
-      for (const cmd of cmds) {
-        if (controller.signal.aborted) break;
-        const result = await executeCmd(cmd);
-        if (result.includes('失败') || result.includes('错误')) {
-          allOk = false;
-          lastErr = result;
-        }
-        context.push({ role: 'user', content: `命令: ${cmd}\n结果: ${result}` });
-      }
-
-      clearInterval(timer);
-
-      // 最新消息状态更新
-      setMessages(prev => {
-        const idx = prev.findIndex(m => m.id === toolMsgId);
-        if (idx === -1) return prev;
-        const next = [...prev];
-        if (allOk) {
-          next.splice(idx, 1); // 成功 → 移除，不打扰
-        } else {
-          next[idx] = { ...next[idx], toolStatus: 'error' as const, toolCommand: '执行失败', toolResult: lastErr };
-        }
-        return next;
-      });
-
-      context.push({ role: 'assistant', content: visibleContent || fullContent });
     }
 
-    // 清理 + 耗时统计
-    const elapsed = ((Date.now() - roundStart) / 1000).toFixed(1);
+    // Finalize: save to messages
     setStreamingText(null);
+    setStreamingReasoning(null);
+
+    // Clean up CMD blocks from content
+    const cmdRegex = /\[CMD\]\s*\n?(.*?)\n?\s*\[\/CMD\]/gs;
+    const visibleContent = fullContent.replace(cmdRegex, '').trim();
+
+    if (visibleContent) {
+      addMessage({ role: 'assistant', content: visibleContent });
+    }
+
     abortRef.current = null;
     setProcessing(false);
-  }, [messages, addMessage, api, executeCmd]);
+  }, [messages, addMessage, api]);
 
   // ── Slash 命令处理 (BUG #11 + #14 修复) ──────────────────────
 
@@ -485,6 +444,7 @@ export function App() {
   const cancelAI = useCallback(() => {
     abortRef.current?.abort();
     setStreamingText(null);
+    setStreamingReasoning(null);
     setProcessing(false);
   }, []);
 
@@ -538,14 +498,28 @@ export function App() {
         />
       }
       streamingText={
-        streamingText ? (
-          <Box flexDirection="row" marginTop={1}>
-            <Box minWidth={2}>
-              <Text color="white">●</Text>
-            </Box>
-            <Box flexDirection="column">
-              <Text>{streamingText}</Text>
-            </Box>
+        streamingText || streamingReasoning ? (
+          <Box flexDirection="column" marginTop={1}>
+            {streamingReasoning && (
+              <Box flexDirection="row" marginBottom={1}>
+                <Box minWidth={2}>
+                  <Text dimColor color="gray">◌</Text>
+                </Box>
+                <Box flexDirection="column">
+                  <Text dimColor color="gray">{streamingReasoning.length > 200 ? streamingReasoning.slice(-200) : streamingReasoning}</Text>
+                </Box>
+              </Box>
+            )}
+            {streamingText && (
+              <Box flexDirection="row">
+                <Box minWidth={2}>
+                  <Text color="white">●</Text>
+                </Box>
+                <Box flexDirection="column">
+                  <Text>{streamingText}</Text>
+                </Box>
+              </Box>
+            )}
           </Box>
         ) : undefined
       }

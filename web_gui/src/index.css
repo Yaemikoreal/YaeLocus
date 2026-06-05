@@ -225,6 +225,20 @@ body {
   letter-spacing: 1.2px;
   padding: 12px 10px 6px;
   margin-top: 4px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.nav-beta {
+  font-size: 9px;
+  font-weight: 600;
+  color: var(--color-primary);
+  background: var(--color-primary-light);
+  padding: 1px 5px;
+  border-radius: 3px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
 }
 
 .nav-item {
@@ -959,9 +973,120 @@ body {
   font-size: 13.5px;
   line-height: 1.65;
   color: var(--text-secondary);
+  white-space: normal;
 }
 
 .message-content strong { color: var(--text); font-weight: 600; }
+
+/* Markdown body styles for AI chat */
+.markdown-body {
+  white-space: normal;
+  word-break: break-word;
+  font-size: 13.5px;
+  line-height: 1.65;
+  color: var(--text-secondary);
+}
+
+.markdown-body p {
+  margin: 0 0 8px 0;
+}
+
+.markdown-body p:last-child {
+  margin-bottom: 0;
+}
+
+.markdown-body h1,
+.markdown-body h2,
+.markdown-body h3,
+.markdown-body h4 {
+  color: var(--text);
+  margin: 12px 0 6px 0;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.markdown-body h1 { font-size: 16px; }
+.markdown-body h2 { font-size: 15px; }
+.markdown-body h3 { font-size: 14px; }
+.markdown-body h4 { font-size: 13.5px; }
+
+.markdown-body ul,
+.markdown-body ol {
+  margin: 4px 0 8px 0;
+  padding-left: 20px;
+}
+
+.markdown-body li {
+  margin: 2px 0;
+}
+
+.markdown-body code {
+  background: var(--bg-tertiary);
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 12px;
+  font-family: 'Space Grotesk', 'Consolas', monospace;
+}
+
+.markdown-body pre {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px 14px;
+  margin: 8px 0;
+  overflow-x: auto;
+}
+
+.markdown-body pre code {
+  background: none;
+  padding: 0;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.markdown-body blockquote {
+  margin: 8px 0;
+  padding: 4px 12px;
+  border-left: 3px solid var(--color-primary);
+  color: var(--text-secondary);
+  background: var(--bg-tertiary);
+  border-radius: 0 4px 4px 0;
+}
+
+.markdown-body hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 10px 0;
+}
+
+.markdown-body table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 8px 0;
+  font-size: 12.5px;
+}
+
+.markdown-body th,
+.markdown-body td {
+  border: 1px solid var(--border);
+  padding: 5px 10px;
+  text-align: left;
+}
+
+.markdown-body th {
+  background: var(--bg-tertiary);
+  font-weight: 600;
+  color: var(--text);
+}
+
+.markdown-body a {
+  color: var(--color-primary);
+  text-decoration: none;
+}
+
+.markdown-body a:hover {
+  text-decoration: underline;
+}
 
 /* Chat input area */
 .chat-input-area {
@@ -1021,17 +1146,146 @@ body {
 .chat-send-btn:hover { background: var(--color-primary-deep); }
 .chat-send-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
+/* ===== Chat Toolbar ===== */
+.chat-toolbar {
+  display: flex;
+  gap: 4px;
+  padding: 8px 24px;
+  border-bottom: 1px solid var(--border);
+}
+
+.chat-toolbar-btn {
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: var(--transition-fast);
+  font-size: 12px;
+}
+
+.chat-toolbar-btn:hover {
+  background: var(--color-primary-light);
+  border-color: rgba(255, 157, 77, 0.2);
+  color: var(--color-primary-deep);
+}
+
+/* ===== Reasoning Block ===== */
+.reasoning-block {
+  margin-bottom: 8px;
+  border-left: 3px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-tertiary);
+  overflow: hidden;
+}
+
+.reasoning-block summary {
+  padding: 6px 12px;
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--text-muted);
+  user-select: none;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.reasoning-block summary::after {
+  content: ' ▾';
+  font-size: 10px;
+}
+
+.reasoning-block[open] summary::after {
+  content: ' ▴';
+}
+
+.reasoning-block:not([open]) summary::after {
+  content: ' ▸';
+}
+
+.reasoning-content {
+  padding: 4px 12px 10px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-tertiary);
+  white-space: pre-wrap;
+}
+
 /* ===== Status Overview ===== */
 .status-overview {
   background: var(--bg-surface);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
-  padding: 14px 18px;
+  padding: 16px 18px;
   margin-bottom: 20px;
-  display: flex;
-  gap: 24px;
-  flex-wrap: wrap;
   box-shadow: var(--shadow-card);
+}
+
+.status-overview-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  margin-bottom: 12px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.status-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+}
+
+.status-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  transition: var(--transition-fast);
+}
+
+.status-card:hover {
+  border-color: rgba(255, 157, 77, 0.3);
+}
+
+.status-card-icon {
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.status-card-info {
+  min-width: 0;
+}
+
+.status-card-label {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-bottom: 2px;
+}
+
+.status-card-value {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .status-item {
@@ -1119,13 +1373,37 @@ body {
 }
 
 .api-key-status {
-  width: 24px;
-  height: 24px;
   display: flex;
   align-items: center;
-  justify-content: center;
+  gap: 6px;
   font-size: 13px;
   flex-shrink: 0;
+}
+
+.test-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 11px;
+  font-weight: 500;
+  padding: 1px 6px;
+  border-radius: 3px;
+  white-space: nowrap;
+}
+
+.test-badge.testing {
+  color: var(--color-primary);
+  background: var(--color-primary-light);
+}
+
+.test-badge.valid {
+  color: var(--success);
+  background: var(--success-bg, rgba(30, 142, 62, 0.1));
+}
+
+.test-badge.invalid {
+  color: var(--error);
+  background: rgba(217, 48, 37, 0.1);
 }
 
 /* ===== Detail Modal ===== */

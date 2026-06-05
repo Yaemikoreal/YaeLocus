@@ -180,8 +180,17 @@ export function batchGeocodeStream(
               results.push(parsed.data);
               onResult(parsed.data);
             }
-            if (parsed.current !== undefined && parsed.total !== undefined) {
-              onProgress(parsed);
+            if (parsed.total !== undefined) {
+              onProgress({
+                step: parsed.step || '',
+                label: parsed.label || '',
+                status: parsed.status || '',
+                total: parsed.total,
+                current: parsed.current !== undefined
+                  ? parsed.current
+                  : (parsed.status === 'done' ? parsed.total : 0),
+                success: parsed.success || 0,
+              });
             }
           } catch {
             // skip non-JSON lines
@@ -240,11 +249,13 @@ const SSE_CHUNK_TIMEOUT_MS = 30_000
 
 export function chatStream(
   prompt: string,
-  context: ChatMessage[],
+  context: { role: string; content: string }[],
   onToken: (token: string) => void,
   onComplete: () => void,
   onError: (error: string) => void,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  onReasoning?: (token: string) => void,
+  sessionId?: string
 ): void {
   const url = `${API_BASE}/api/chat/stream`
   const controller = signal ? undefined : new AbortController()
@@ -266,7 +277,7 @@ export function chatStream(
   fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ prompt, context }),
+    body: JSON.stringify({ prompt, context, session_id: sessionId }),
     signal: abortSignal,
   })
     .then(async (res) => {
@@ -305,7 +316,13 @@ export function chatStream(
               onError(parsed.error)
               return
             }
-            if (parsed.token) onToken(parsed.token)
+            if (parsed.type === 'reasoning' && onReasoning) {
+              onReasoning(parsed.content || '')
+            } else if (parsed.type === 'content') {
+              onToken(parsed.content || '')
+            } else if (parsed.token) {
+              onToken(parsed.token)
+            }
           } catch {
             // skip
           }
@@ -321,6 +338,128 @@ export function chatStream(
     })
 }
 
+// ── AI Agent 循环 (SSE 流式 — 统一后端) ──
+
+export interface AgentStreamCallbacks {
+  onContent: (token: string) => void
+  onReasoning: (token: string) => void
+  onToolUse: (tool: { id: string; name: string; arguments: string }) => void
+  onToolUseDelta: (delta: { id: string; name: string; arguments_delta: string }) => void
+  onToolResult: (result: { command: string; result: string; success: boolean }) => void
+  onToolError: (error: { command: string; error: { code: string; message: string; recoverable: boolean; autoFixAction?: string }; recoverable: boolean; autoFixAction?: string }) => void
+  onToolRecovery: (info: { original_command: string; fix_command?: string; wait_seconds?: number }) => void
+  onRoundStart: (info: { round: number; max_rounds: number }) => void
+  onDone: () => void
+  onError: (error: { code: string; message: string }) => void
+}
+
+export function agentStream(
+  prompt: string,
+  callbacks: AgentStreamCallbacks,
+  options?: { context?: { role: string; content: string }[]; sessionId?: string; useTools?: boolean; signal?: AbortSignal }
+): void {
+  const url = `${API_BASE}/api/chat/agent`
+  const abortSignal = options?.signal
+
+  fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      prompt,
+      context: options?.context || [],
+      session_id: options?.sessionId,
+      use_tools: options?.useTools !== false,
+    }),
+    signal: abortSignal,
+  })
+    .then(async (res) => {
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}))
+        callbacks.onError({ code: String(res.status), message: body.error || body.detail || `请求失败 (HTTP ${res.status})` })
+        return
+      }
+      const reader = res.body?.getReader()
+      if (!reader) {
+        callbacks.onError({ code: 'network', message: '浏览器不支持流式读取' })
+        return
+      }
+      const decoder = new TextDecoder()
+      let buffer = ''
+      while (true) {
+        if (abortSignal?.aborted) break
+        const { done, value } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split('\n')
+        buffer = lines.pop() || ''
+        for (const line of lines) {
+          const trimmed = line.trim()
+          if (!trimmed || !trimmed.startsWith('data: ')) continue
+          const data = trimmed.slice(6)
+          if (data === '[DONE]') {
+            callbacks.onDone()
+            return
+          }
+          try {
+            const event = JSON.parse(data)
+            switch (event.type) {
+              case 'content':
+                callbacks.onContent(event.content || '')
+                break
+              case 'reasoning':
+                callbacks.onReasoning(event.content || '')
+                break
+              case 'tool_use':
+                callbacks.onToolUse({ id: event.id || '', name: event.name || '', arguments: event.arguments || '' })
+                break
+              case 'tool_use_delta':
+                callbacks.onToolUseDelta({ id: event.id || '', name: event.name || '', arguments_delta: event.arguments_delta || '' })
+                break
+              case 'tool_result':
+                callbacks.onToolResult({
+                  command: event.command || '',
+                  result: event.result || '',
+                  success: event.success !== false,
+                })
+                break
+              case 'tool_error':
+                callbacks.onToolError({
+                  command: event.command || '',
+                  error: event.error || { code: 'unknown', message: '未知错误', recoverable: false },
+                  recoverable: event.recoverable || false,
+                  autoFixAction: event.auto_fix_action,
+                })
+                break
+              case 'tool_recovery':
+                callbacks.onToolRecovery({
+                  original_command: event.original_command || '',
+                  fix_command: event.fix_command,
+                  wait_seconds: event.wait_seconds,
+                })
+                break
+              case 'round_start':
+                callbacks.onRoundStart({ round: event.round || 1, max_rounds: event.max_rounds || 4 })
+                break
+              case 'done':
+                callbacks.onDone()
+                return
+              case 'error':
+                callbacks.onError({ code: event.code || 'unknown', message: event.message || '未知错误' })
+                break
+            }
+          } catch {
+            // skip malformed JSON
+          }
+        }
+      }
+      callbacks.onDone()
+    })
+    .catch((e) => {
+      if (e.name === 'AbortError') return
+      callbacks.onError({ code: 'network', message: e.message || '网络错误' })
+    })
+}
+
 // ── AI 命令执行 ──
 export async function executeCommand(
   command: string,
@@ -330,6 +469,16 @@ export async function executeCommand(
     method: 'POST',
     body: JSON.stringify({ command }),
   }, signal);
+}
+
+// ── 打开目录 ──
+export async function openDirectory(
+  type: 'output/map' | 'output/csv' | 'data'
+): Promise<{ opened: string; type: string }> {
+  return request('/api/open/directory', {
+    method: 'POST',
+    body: JSON.stringify({ type }),
+  });
 }
 
 // ── 配置获取 ──
@@ -534,4 +683,47 @@ export function aiAnalyzeStream(
       if (e.name === 'AbortError') return
       onError(e.message || '网络错误')
     })
+}
+
+// ── AI 对话会话管理 ──
+
+export interface ChatSessionInfo {
+  id: string
+  title: string
+  created_at: number
+  updated_at: number
+}
+
+export async function listSessions(signal?: AbortSignal): Promise<{ sessions: ChatSessionInfo[]; count: number }> {
+  return request('/api/chat/sessions', {}, signal)
+}
+
+export async function createSession(title: string = '', signal?: AbortSignal): Promise<ChatSessionInfo> {
+  return request('/api/chat/sessions', { method: 'POST', body: JSON.stringify({ title }) }, signal)
+}
+
+export async function getSession(sessionId: string, signal?: AbortSignal): Promise<{ session: ChatSessionInfo; messages: ChatMessage[] }> {
+  return request(`/api/chat/sessions/${sessionId}`, {}, signal)
+}
+
+export async function deleteSession(sessionId: string, signal?: AbortSignal): Promise<{ status: string }> {
+  return request(`/api/chat/sessions/${sessionId}`, { method: 'DELETE' }, signal)
+}
+
+export async function addMessage(sessionId: string, role: string, content: string, reasoning: string = '', signal?: AbortSignal): Promise<ChatMessage> {
+  return request(`/api/chat/sessions/${sessionId}/messages`, {
+    method: 'POST',
+    body: JSON.stringify({ role, content, reasoning }),
+  }, signal)
+}
+
+export async function compactSession(sessionId: string, summary?: string, signal?: AbortSignal): Promise<{ status: string; summary: string }> {
+  return request(`/api/chat/sessions/${sessionId}/compact`, {
+    method: 'POST',
+    body: JSON.stringify(summary ? { summary } : {}),
+  }, signal)
+}
+
+export async function getSessionContext(sessionId: string, maxMessages: number = 30, signal?: AbortSignal): Promise<{ context: ChatMessage[] }> {
+  return request(`/api/chat/sessions/${sessionId}/context?max_messages=${maxMessages}`, {}, signal)
 }
